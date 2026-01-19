@@ -1,0 +1,207 @@
+// TODO(darsor): pub use stuff that other architectures pub use
+// TODO(darsor): rename things from LEON3 to SPARC or SPARCV8 as appropriate
+
+use std::sync::Arc;
+
+use crate::{
+    CoreInterface,
+    architecture::leon3::{
+        communication_interface::Leon3CommunicationInterface, sequences::Leon3DebugSequence,
+    },
+    memory::CoreMemoryInterface,
+};
+
+mod ahbjtag;
+pub mod communication_interface;
+mod dsu3;
+mod plugnplay;
+pub mod registers;
+pub mod sequences;
+
+/// An interface to operate a LEON3 core.
+pub struct Leon3<'state> {
+    interface: Leon3CommunicationInterface<'state>,
+    state: &'state mut Leon3CoreState,
+    sequence: Arc<dyn Leon3DebugSequence>,
+}
+
+impl<'state> Leon3<'state> {
+    pub fn new(
+        interface: Leon3CommunicationInterface<'state>,
+        state: &'state mut Leon3CoreState,
+        sequence: Arc<dyn Leon3DebugSequence>,
+    ) -> Result<Self, crate::Error> {
+        let this = Self {
+            interface,
+            state,
+            sequence,
+        };
+
+        // TODO(darsor)
+        // this.on_attach()?;
+
+        Ok(this)
+    }
+}
+
+/// Leon3 core state.
+#[derive(Debug)]
+pub struct Leon3CoreState {
+    // TODO(darsor)
+}
+
+impl Leon3CoreState {
+    /// Creates a new [`Leon3CoreState`].
+    pub(crate) fn new() -> Self {
+        Self {}
+    }
+}
+
+impl<'state> CoreInterface for Leon3<'state> {
+    fn wait_for_core_halted(&mut self, timeout: std::time::Duration) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn core_halted(&mut self) -> Result<bool, crate::Error> {
+        todo!()
+    }
+
+    fn status(&mut self) -> Result<crate::CoreStatus, crate::Error> {
+        todo!()
+    }
+
+    fn halt(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<crate::CoreInformation, crate::Error> {
+        todo!()
+    }
+
+    fn run(&mut self) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn reset(&mut self) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn reset_and_halt(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<crate::CoreInformation, crate::Error> {
+        todo!()
+    }
+
+    fn step(&mut self) -> Result<crate::CoreInformation, crate::Error> {
+        todo!()
+    }
+
+    fn read_core_reg(
+        &mut self,
+        address: crate::RegisterId,
+    ) -> Result<crate::RegisterValue, crate::Error> {
+        todo!()
+    }
+
+    fn write_core_reg(
+        &mut self,
+        address: crate::RegisterId,
+        value: crate::RegisterValue,
+    ) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn available_breakpoint_units(&mut self) -> Result<u32, crate::Error> {
+        todo!()
+    }
+
+    fn hw_breakpoints(&mut self) -> Result<Vec<Option<u64>>, crate::Error> {
+        todo!()
+    }
+
+    fn enable_breakpoints(&mut self, state: bool) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn registers(&self) -> &'static crate::CoreRegisters {
+        todo!()
+    }
+
+    fn program_counter(&self) -> &'static crate::CoreRegister {
+        todo!()
+    }
+
+    fn frame_pointer(&self) -> &'static crate::CoreRegister {
+        todo!()
+    }
+
+    fn stack_pointer(&self) -> &'static crate::CoreRegister {
+        todo!()
+    }
+
+    fn return_address(&self) -> &'static crate::CoreRegister {
+        todo!()
+    }
+
+    fn hw_breakpoints_enabled(&self) -> bool {
+        todo!()
+    }
+
+    fn architecture(&self) -> probe_rs_target::Architecture {
+        todo!()
+    }
+
+    fn core_type(&self) -> probe_rs_target::CoreType {
+        todo!()
+    }
+
+    fn instruction_set(&mut self) -> Result<probe_rs_target::InstructionSet, crate::Error> {
+        todo!()
+    }
+
+    fn fpu_support(&mut self) -> Result<bool, crate::Error> {
+        todo!()
+    }
+
+    fn floating_point_register_count(&mut self) -> Result<usize, crate::Error> {
+        todo!()
+    }
+
+    fn reset_catch_set(&mut self) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn reset_catch_clear(&mut self) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn debug_core_stop(&mut self) -> Result<(), crate::Error> {
+        todo!()
+    }
+
+    fn spill_registers(&mut self) -> Result<(), crate::Error> {
+        // For most architectures, this is not necessary. Use cases include processors
+        // that have a windowed register file, where the whole register file is not visible at once.
+        todo!()
+    }
+}
+
+impl<'state> CoreMemoryInterface for Leon3<'state> {
+    type ErrorType = crate::Error;
+
+    fn memory(&self) -> &dyn crate::MemoryInterface<Self::ErrorType> {
+        &self.interface.ahb
+    }
+
+    fn memory_mut(&mut self) -> &mut dyn crate::MemoryInterface<Self::ErrorType> {
+        &mut self.interface.ahb
+    }
+}

@@ -7,8 +7,9 @@ use probe_rs::config::Registry;
 use probe_rs::flashing::FlashAlgorithm;
 use probe_rs_target::{
     Architecture, ArmCoreAccessOptions, Chip, ChipFamily, Core as ProbeCore, CoreAccessOptions,
-    CoreType, GenericRegion, MemoryAccess, MemoryRegion, NvmRegion, RamRegion, RawFlashAlgorithm,
-    RiscvCoreAccessOptions, TargetDescriptionSource, XtensaCoreAccessOptions,
+    CoreType, GenericRegion, Leon3CoreAccessOptions, MemoryAccess, MemoryRegion, NvmRegion,
+    RamRegion, RawFlashAlgorithm, RiscvCoreAccessOptions, TargetDescriptionSource,
+    XtensaCoreAccessOptions,
 };
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -219,6 +220,9 @@ fn create_core(processor: &Processor) -> Result<ProbeCore> {
             }),
             Architecture::Xtensa => {
                 CoreAccessOptions::Xtensa(XtensaCoreAccessOptions { jtag_tap: None })
+            }
+            Architecture::Sparc => {
+                CoreAccessOptions::Leon3(Leon3CoreAccessOptions { jtag_tap: None })
             }
         },
     })

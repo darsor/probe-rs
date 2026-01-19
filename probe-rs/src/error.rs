@@ -1,4 +1,5 @@
 use crate::architecture::arm::ArmError;
+use crate::architecture::leon3::communication_interface::Leon3Error;
 use crate::architecture::riscv::communication_interface::RiscvError;
 use crate::architecture::xtensa::communication_interface::XtensaError;
 use crate::config::RegistryError;
@@ -17,6 +18,8 @@ pub enum Error {
     Riscv(#[source] RiscvError),
     /// An Xtensa specific error occurred.
     Xtensa(#[source] XtensaError),
+    /// A Leon3 specific error occurred.
+    Leon3(#[source] Leon3Error),
     /// Core {0} is not enabled.
     CoreDisabled(usize),
     /// Core {0} does not exist.

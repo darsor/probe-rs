@@ -70,6 +70,7 @@ impl TargetDescription {
             CoreType::Armv8m => "armv8-m.main",
             CoreType::Riscv => "riscv:rv32",
             CoreType::Xtensa => "xtensa",
+            CoreType::Sparc => "sparc",
         };
 
         Self {
@@ -246,6 +247,7 @@ pub fn build_target_description(
         },
         CoreType::Riscv => build_riscv_registers(&mut desc, regs),
         CoreType::Xtensa => build_xtensa_registers(&mut desc, regs),
+        CoreType::Sparc => build_sparc_registers(&mut desc, regs),
     };
 
     desc
@@ -351,5 +353,27 @@ fn build_cortex_m_registers(desc: &mut TargetDescription, regs: &CoreRegisters) 
 }
 
 fn build_xtensa_registers(_desc: &mut TargetDescription, _regs: &CoreRegisters) {
+    todo!()
+}
+
+fn build_sparc_registers(desc: &mut TargetDescription, regs: &CoreRegisters) {
+    // Create the main register group
+    desc.add_gdb_feature("org.gnu.gdb.sparc.cpu");
+    desc.add_registers(regs.core_registers());
+
+    // TODO(darsor)
+    // From GDB docs:
+    // The "org.gnu.gdb.sparc.cpu" feature is required for sparc32/sparc64 targets. It should describe the following registers:
+    //     - "g0" through "g7"
+    //     - "o0" through "o7"
+    //     - "l0" through "l7"
+    //     - "i0" through "i7"
+    // They may be 32-bit or 64-bit depending on the target.
+    // Also the "org.gnu.gdb.sparc.fpu" feature is required for sparc32/sparc64 targets. It should describe the following registers:
+    //     - "f0" through "f31"
+    //     - "f32" through "f62" for sparc64
+    // The "org.gnu.gdb.sparc.cp0" feature is required for sparc32/sparc64 targets. It should describe the following registers:
+    //     - "y", "psr", "wim", "tbr", "pc", "npc", "fsr", and "csr" for sparc32
+    //     - "pc", "npc", "state", "fsr", "fprs", and "y" for sparc64
     todo!()
 }

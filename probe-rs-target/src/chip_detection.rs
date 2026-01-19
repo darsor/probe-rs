@@ -185,3 +185,5 @@ pub struct InfineonPsocSiidDetection {
     #[serde(deserialize_with = "maps_duplicate_key_is_error::deserialize")]
     pub silicon_ids: IndexMap<u16, String>,
 }
+
+// TODO(darsor): add leon3 detection?

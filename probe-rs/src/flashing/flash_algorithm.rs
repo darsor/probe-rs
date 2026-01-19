@@ -197,6 +197,8 @@ impl FlashAlgorithm {
 
     const XTENSA_FLASH_BLOB_HEADER: [u32; 0] = [];
 
+    const LEON3_FLASH_BLOB_HEADER: [u32; 0] = [];
+
     /// When the target architecture is not known, and we need to allocate space for the header,
     /// this function returns the maximum size of the header of supported architectures.
     pub fn get_max_algorithm_header_size() -> u64 {
@@ -241,6 +243,7 @@ impl FlashAlgorithm {
             },
             CoreType::Riscv => &Self::RISCV_FLASH_BLOB_HEADER,
             CoreType::Xtensa => &Self::XTENSA_FLASH_BLOB_HEADER,
+            CoreType::Sparc => &Self::LEON3_FLASH_BLOB_HEADER,
         }
     }
 
@@ -249,6 +252,7 @@ impl FlashAlgorithm {
             Architecture::Arm => 8,
             Architecture::Riscv => 16,
             Architecture::Xtensa => 16,
+            Architecture::Sparc => 16,
         }
     }
 

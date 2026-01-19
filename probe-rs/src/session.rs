@@ -9,6 +9,7 @@ use crate::{
             memory::CoresightComponent,
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
+        leon3::communication_interface::{Leon3CommunicationInterface, Leon3DebugInterfaceState},
         riscv::communication_interface::{
             RiscvCommunicationInterface, RiscvDebugInterfaceState, RiscvError,
         },
@@ -72,6 +73,7 @@ pub struct SessionConfig {
 enum JtagInterface {
     Riscv(RiscvDebugInterfaceState),
     Xtensa(XtensaDebugInterfaceState),
+    Leon3(Leon3DebugInterfaceState),
     Unknown,
 }
 
@@ -81,6 +83,7 @@ impl JtagInterface {
         match self {
             JtagInterface::Riscv(_) => Some(Architecture::Riscv),
             JtagInterface::Xtensa(_) => Some(Architecture::Xtensa),
+            JtagInterface::Leon3(_) => Some(Architecture::Sparc),
             JtagInterface::Unknown => None,
         }
     }
@@ -91,6 +94,7 @@ impl fmt::Debug for JtagInterface {
         match self {
             JtagInterface::Riscv(_) => f.write_str("Riscv(..)"),
             JtagInterface::Xtensa(_) => f.write_str("Xtensa(..)"),
+            JtagInterface::Leon3(_) => f.write_str("Leon3(..)"),
             JtagInterface::Unknown => f.write_str("Unknown"),
         }
     }
@@ -136,6 +140,13 @@ impl ArchitectureInterface {
                     JtagInterface::Xtensa(state) => {
                         let iface = probe.try_get_xtensa_interface(state)?;
                         combined_state.attach_xtensa(target, iface)
+                    }
+                    JtagInterface::Leon3(state) => {
+                        let probe = probe
+                            .try_as_jtag_probe()
+                            .ok_or(DebugProbeError::UnsupportedProtocol(WireProtocol::Jtag))?;
+                        let iface = Leon3CommunicationInterface::new(probe, state);
+                        combined_state.attach_leon3(target, iface)
                     }
                     JtagInterface::Unknown => {
                         unreachable!(
@@ -410,6 +421,13 @@ impl Session {
                     JtagInterface::Riscv(state)
                 }
                 Architecture::Xtensa => JtagInterface::Xtensa(XtensaDebugInterfaceState::default()),
+                Architecture::Sparc => {
+                    let probe = probe
+                        .try_as_jtag_probe()
+                        .ok_or(DebugProbeError::UnsupportedProtocol(WireProtocol::Jtag))?;
+                    let state = Leon3DebugInterfaceState::try_attach(probe, &target)?;
+                    JtagInterface::Leon3(state)
+                }
                 _ => {
                     return Err(Error::Probe(DebugProbeError::Other(format!(
                         "Unsupported core architecture {core_arch:?}",

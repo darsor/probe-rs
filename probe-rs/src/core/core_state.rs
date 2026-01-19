@@ -6,6 +6,7 @@ use crate::{
             core::{CortexAState, CortexMState},
             dp::DpAddress,
         },
+        leon3::{Leon3CoreState, communication_interface::Leon3CommunicationInterface},
         riscv::{RiscvCoreState, communication_interface::RiscvCommunicationInterface},
         xtensa::{XtensaCoreState, communication_interface::XtensaCommunicationInterface},
     },
@@ -217,6 +218,37 @@ impl CombinedCoreState {
         ))
     }
 
+    pub(crate) fn attach_leon3<'probe>(
+        &'probe mut self,
+        target: &'probe Target,
+        interface: Leon3CommunicationInterface<'probe>,
+    ) -> Result<Core<'probe>, Error> {
+        let name = &target.cores[self.id].name;
+
+        let ResolvedCoreOptions::Sparc { sequence, .. } = &self.core_state.core_access_options
+        else {
+            unreachable!(
+                "The stored core state is not compatible with the SPARC architecture. \
+                This should never happen. Please file a bug if it does."
+            );
+        };
+        let debug_sequence = sequence.clone();
+
+        let SpecificCoreState::Leon3(s) = &mut self.specific_state else {
+            unreachable!(
+                "The stored core state is not compatible with the LEON3 SPARC architecture. \
+                This should never happen. Please file a bug if it does."
+            );
+        };
+
+        Ok(Core::new(
+            self.id,
+            name,
+            target,
+            crate::architecture::leon3::Leon3::new(interface, s, debug_sequence)?,
+        ))
+    }
+
     /// Get the memory AP for this core.
     ///
     /// ## Panic
@@ -282,6 +314,8 @@ pub enum SpecificCoreState {
     Riscv(RiscvCoreState),
     /// The state of an Xtensa core.
     Xtensa(XtensaCoreState),
+    /// The state of a Leon3 core.
+    Leon3(Leon3CoreState),
 }
 
 impl SpecificCoreState {
@@ -295,6 +329,7 @@ impl SpecificCoreState {
             CoreType::Armv8m => SpecificCoreState::Armv8m(CortexMState::new()),
             CoreType::Riscv => SpecificCoreState::Riscv(RiscvCoreState::new()),
             CoreType::Xtensa => SpecificCoreState::Xtensa(XtensaCoreState::new()),
+            CoreType::Sparc => SpecificCoreState::Leon3(Leon3CoreState::new()),
         }
     }
 
@@ -308,6 +343,7 @@ impl SpecificCoreState {
             SpecificCoreState::Armv8m(_) => CoreType::Armv8m,
             SpecificCoreState::Riscv(_) => CoreType::Riscv,
             SpecificCoreState::Xtensa(_) => CoreType::Xtensa,
+            SpecificCoreState::Leon3(_) => CoreType::Sparc,
         }
     }
 }

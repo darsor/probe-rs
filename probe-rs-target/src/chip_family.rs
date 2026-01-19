@@ -47,6 +47,8 @@ pub enum CoreType {
     Riscv,
     /// Xtensa - TODO: may need to split into NX, LX6 and LX7
     Xtensa,
+    /// SPARC - TODO(darsor): may need to split into V7, V8, etc.
+    Sparc,
 }
 
 impl CoreType {
@@ -78,11 +80,16 @@ impl CoreType {
         )
     }
 
+    fn is_sparc(&self) -> bool {
+        matches!(self, CoreType::Sparc)
+    }
+
     /// Returns the parent architecture family of this core type.
     pub fn architecture(&self) -> Architecture {
         match self {
             CoreType::Riscv => Architecture::Riscv,
             CoreType::Xtensa => Architecture::Xtensa,
+            CoreType::Sparc => Architecture::Sparc,
             _ => Architecture::Arm,
         }
     }
@@ -97,6 +104,8 @@ pub enum Architecture {
     Riscv,
     /// An Xtensa core.
     Xtensa,
+    /// A SPARC core.
+    Sparc,
 }
 
 /// Instruction set used by a core
@@ -114,6 +123,9 @@ pub enum InstructionSet {
     RV32C,
     /// Xtensa instruction set
     Xtensa,
+    // TODO(darsor): should this include V7/v8?
+    /// Sparc instruction set
+    Sparc,
 }
 
 impl InstructionSet {
@@ -124,6 +136,7 @@ impl InstructionSet {
             "arm" => Some(InstructionSet::A32),
             "aarch64" => Some(InstructionSet::A64),
             "xtensa" => Some(InstructionSet::Xtensa),
+            "sparc" => Some(InstructionSet::Sparc),
             other => {
                 if let Some(features) = other.strip_prefix("riscv32") {
                     if features.contains('c') {
@@ -150,6 +163,7 @@ impl InstructionSet {
             InstructionSet::RV32 => 4,
             InstructionSet::RV32C => 2,
             InstructionSet::Xtensa => 2,
+            InstructionSet::Sparc => 4,
         }
     }
     /// Get the maximum instruction size in bytes. All supported architectures have a maximum instruction size of 4 bytes.

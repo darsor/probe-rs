@@ -8,7 +8,7 @@ use addr2line::gimli::RunTimeEndian;
 use anyhow::{Result, anyhow};
 use capstone::{
     Endian, arch::arm::ArchMode as armArchMode, arch::arm64::ArchMode as aarch64ArchMode,
-    arch::riscv::ArchMode as riscvArchMode, prelude::*,
+    arch::riscv::ArchMode as riscvArchMode, arch::sparc::ArchMode as sparcArchMode, prelude::*,
 };
 use itertools::Itertools;
 use probe_rs::{CoreType, Error, InstructionSet, MemoryInterface};
@@ -418,6 +418,7 @@ fn get_capstone_le(target_core: &mut CoreHandle<'_>) -> Result<Capstone, Debugge
             ))
             .build(),
         InstructionSet::Xtensa => return Err(DebuggerError::Unimplemented),
+        InstructionSet::Sparc => Capstone::new().sparc().mode(sparcArchMode::Default).build(),
     }
     .map_err(|err| anyhow!("Error creating capstone: {err:?}"))?;
     let _ = cs.set_skipdata(true);

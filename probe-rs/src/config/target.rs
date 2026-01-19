@@ -7,6 +7,7 @@ use crate::{
             dp::DpAddress,
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
+        leon3::sequences::{DefaultLeon3Sequence, Leon3DebugSequence},
         riscv::sequences::{DefaultRiscvSequence, RiscvDebugSequence},
         xtensa::sequences::{DefaultXtensaSequence, XtensaDebugSequence},
     },
@@ -119,6 +120,7 @@ impl Target {
                 Architecture::Arm => DebugSequence::Arm(DefaultArmSequence::create()),
                 Architecture::Riscv => DebugSequence::Riscv(DefaultRiscvSequence::create()),
                 Architecture::Xtensa => DebugSequence::Xtensa(DefaultXtensaSequence::create()),
+                Architecture::Sparc => DebugSequence::Leon3(DefaultLeon3Sequence::create()),
             }
         });
 
@@ -267,6 +269,8 @@ pub enum DebugSequence {
     Riscv(Arc<dyn RiscvDebugSequence>),
     /// An Xtensa debug sequence.
     Xtensa(Arc<dyn XtensaDebugSequence>),
+    /// A Leon3 debug sequence.
+    Leon3(Arc<dyn Leon3DebugSequence>),
 }
 
 pub(crate) trait CoreExt {
@@ -294,6 +298,7 @@ impl CoreExt for Core {
             }
             probe_rs_target::CoreAccessOptions::Riscv(_) => None,
             probe_rs_target::CoreAccessOptions::Xtensa(_) => None,
+            probe_rs_target::CoreAccessOptions::Leon3(_) => None,
         }
     }
 }

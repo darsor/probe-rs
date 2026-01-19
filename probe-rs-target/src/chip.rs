@@ -20,6 +20,19 @@ impl ScanChainElement {
     }
 }
 
+/// Configuration for AHBJTAG access.
+///
+/// AHBJTAG uses two JTAG custom instructions to access the ADATA and DATA registers.
+/// If configured properly, this grants access to the system AHB bus.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AhbJtag {
+    /// Address of the ADATA register
+    pub adata_addr: u32,
+
+    /// Address of the DDATA register
+    pub ddata_addr: u32,
+}
+
 /// Configuration for JTAG tunneling.
 ///
 /// This JTAG tunnel wraps JTAG IR and DR accesses as DR access to a specific instruction. For
@@ -46,6 +59,10 @@ pub struct Jtag {
     /// Describes JTAG tunnel for Risc-V
     #[serde(default)]
     pub riscv_tunnel: Option<RiscvJtagTunnel>,
+
+    /// Describes AHBJTAG registers for LEON3
+    #[serde(default)]
+    pub ahbjtag: Option<AhbJtag>,
 }
 
 /// A single chip variant.
@@ -166,6 +183,8 @@ pub enum CoreAccessOptions {
     Riscv(RiscvCoreAccessOptions),
     /// Xtensa specific options
     Xtensa(XtensaCoreAccessOptions),
+    /// Leon3 specific options
+    Leon3(Leon3CoreAccessOptions),
 }
 
 /// An address for AP accesses
@@ -223,6 +242,14 @@ pub struct RiscvCoreAccessOptions {
 /// The data required to access an Xtensa core
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XtensaCoreAccessOptions {
+    /// The JTAG TAP index of the core's debug module
+    pub jtag_tap: Option<usize>,
+}
+
+/// The data required to access a Leon3 core
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Leon3CoreAccessOptions {
+    // TODO(darsor): add AHBJTAG register addresses and IR length?
     /// The JTAG TAP index of the core's debug module
     pub jtag_tap: Option<usize>,
 }
