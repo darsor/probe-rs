@@ -1,5 +1,5 @@
 use crate::{
-    Core, CoreType, Error,
+    Core, CoreType, Error, MemoryInterface,
     architecture::{
         arm::{
             ArmError, SwoReader,
@@ -9,7 +9,10 @@ use crate::{
             memory::CoresightComponent,
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
-        leon3::communication_interface::{Leon3CommunicationInterface, Leon3DebugInterfaceState},
+        leon3::{
+            ahbjtag::AhbJtag,
+            communication_interface::{Leon3CommunicationInterface, Leon3DebugInterfaceState},
+        },
         riscv::communication_interface::{
             RiscvCommunicationInterface, RiscvDebugInterfaceState, RiscvError,
         },
@@ -19,6 +22,7 @@ use crate::{
     },
     config::{CoreExt, DebugSequence, RegistryError, Target, TargetSelector, registry::Registry},
     core::{Architecture, CombinedCoreState},
+    memory::CoreMemoryInterface,
     probe::{
         AttachMethod, DebugProbeError, Probe, ProbeCreationError, WireProtocol,
         fake_probe::FakeProbe, list::Lister,
@@ -73,7 +77,6 @@ pub struct SessionConfig {
 enum JtagInterface {
     Riscv(RiscvDebugInterfaceState),
     Xtensa(XtensaDebugInterfaceState),
-    Leon3(Leon3DebugInterfaceState),
     Unknown,
 }
 
@@ -83,7 +86,6 @@ impl JtagInterface {
         match self {
             JtagInterface::Riscv(_) => Some(Architecture::Riscv),
             JtagInterface::Xtensa(_) => Some(Architecture::Xtensa),
-            JtagInterface::Leon3(_) => Some(Architecture::Sparc),
             JtagInterface::Unknown => None,
         }
     }
@@ -94,8 +96,64 @@ impl fmt::Debug for JtagInterface {
         match self {
             JtagInterface::Riscv(_) => f.write_str("Riscv(..)"),
             JtagInterface::Xtensa(_) => f.write_str("Xtensa(..)"),
-            JtagInterface::Leon3(_) => f.write_str("Leon3(..)"),
             JtagInterface::Unknown => f.write_str("Unknown"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum BusAccess {
+    AhbJtag(AhbJtag),
+}
+
+impl BusAccess {
+    fn new_ahbjtag(mut probe: Probe, config: probe_rs_target::AhbJtag) -> Result<Self, Error> {
+        probe
+            .try_as_jtag_probe()
+            .ok_or(DebugProbeError::UnsupportedProtocol(WireProtocol::Jtag))?;
+        Ok(Self::AhbJtag(AhbJtag::new(probe, config)))
+    }
+
+    fn as_probe(&mut self) -> &mut Probe {
+        match self {
+            BusAccess::AhbJtag(ahb_jtag) => ahb_jtag.as_probe(),
+        }
+    }
+}
+
+impl CoreMemoryInterface for BusAccess {
+    type ErrorType = Error;
+
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        match self {
+            BusAccess::AhbJtag(ahb_jtag) => ahb_jtag,
+        }
+    }
+
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        match self {
+            BusAccess::AhbJtag(ahb_jtag) => ahb_jtag,
+        }
+    }
+}
+
+enum SystemBusInterface {
+    Leon3(Leon3DebugInterfaceState),
+}
+
+impl SystemBusInterface {
+    /// Returns the debug module's intended architecture.
+    fn architecture(&self) -> Architecture {
+        match self {
+            SystemBusInterface::Leon3(_) => Architecture::Sparc,
+        }
+    }
+}
+
+impl fmt::Debug for SystemBusInterface {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SystemBusInterface::Leon3(_) => f.write_str("Leon3(..)"),
         }
     }
 }
@@ -104,6 +162,9 @@ impl fmt::Debug for JtagInterface {
 enum ArchitectureInterface {
     Arm(Box<dyn ArmDebugInterface + 'static>),
     Jtag(Probe, Vec<JtagInterface>),
+    /// Architectures that start with full probe access to the system bus, from
+    /// which debug units and cores can be accessed.
+    SystemBus(BusAccess, SystemBusInterface),
 }
 
 impl fmt::Debug for ArchitectureInterface {
@@ -113,6 +174,10 @@ impl fmt::Debug for ArchitectureInterface {
             ArchitectureInterface::Jtag(_, ifaces) => f
                 .debug_tuple("ArchitectureInterface::Jtag(..)")
                 .field(ifaces)
+                .finish(),
+            ArchitectureInterface::SystemBus(_, iface) => f
+                .debug_tuple("ArchitectureInterface::SystemBus(..)")
+                .field(iface)
                 .finish(),
         }
     }
@@ -141,13 +206,6 @@ impl ArchitectureInterface {
                         let iface = probe.try_get_xtensa_interface(state)?;
                         combined_state.attach_xtensa(target, iface)
                     }
-                    JtagInterface::Leon3(state) => {
-                        let probe = probe
-                            .try_as_jtag_probe()
-                            .ok_or(DebugProbeError::UnsupportedProtocol(WireProtocol::Jtag))?;
-                        let iface = Leon3CommunicationInterface::new(probe, state);
-                        combined_state.attach_leon3(target, iface)
-                    }
                     JtagInterface::Unknown => {
                         unreachable!(
                             "Tried to attach to unknown interface {idx}. This should never happen."
@@ -155,6 +213,12 @@ impl ArchitectureInterface {
                     }
                 }
             }
+            ArchitectureInterface::SystemBus(probe, interface) => match interface {
+                SystemBusInterface::Leon3(state) => {
+                    let iface = Leon3CommunicationInterface::try_attach(probe, state)?;
+                    combined_state.attach_leon3(target, iface)
+                }
+            },
         }
     }
 }
@@ -184,10 +248,16 @@ impl Session {
             })
             .collect();
 
-        let mut session = if let Architecture::Arm = target.architecture() {
-            Self::attach_arm_debug_interface(probe, target, attach_method, permissions, cores)?
-        } else {
-            Self::attach_jtag(probe, target, attach_method, permissions, cores)?
+        let mut session = match target.architecture() {
+            Architecture::Arm => {
+                Self::attach_arm_debug_interface(probe, target, attach_method, permissions, cores)?
+            }
+            Architecture::Riscv | Architecture::Xtensa => {
+                Self::attach_jtag(probe, target, attach_method, permissions, cores)?
+            }
+            Architecture::Sparc => {
+                Self::attach_system_bus(probe, target, attach_method, permissions, cores)?
+            }
         };
 
         session.clear_all_hw_breakpoints()?;
@@ -421,13 +491,6 @@ impl Session {
                     JtagInterface::Riscv(state)
                 }
                 Architecture::Xtensa => JtagInterface::Xtensa(XtensaDebugInterfaceState::default()),
-                Architecture::Sparc => {
-                    let probe = probe
-                        .try_as_jtag_probe()
-                        .ok_or(DebugProbeError::UnsupportedProtocol(WireProtocol::Jtag))?;
-                    let state = Leon3DebugInterfaceState::try_attach(probe, &target)?;
-                    JtagInterface::Leon3(state)
-                }
                 _ => {
                     return Err(Error::Probe(DebugProbeError::Other(format!(
                         "Unsupported core architecture {core_arch:?}",
@@ -458,6 +521,64 @@ impl Session {
         };
 
         Ok(session)
+    }
+
+    fn attach_system_bus(
+        mut probe: Probe,
+        target: Target,
+        _attach_method: AttachMethod,
+        _permissions: Permissions,
+        cores: Vec<CombinedCoreState>,
+    ) -> Result<Self, Error> {
+        // currently only AHBJTAG is supported, but others may be added in the future
+        // e.g., Ethernet via EDCL.
+        let Some(jtag) = target.jtag.as_ref() else {
+            return Err(Error::Other(
+                "System bus interface requires a JTAG target configuration".into(),
+            ));
+        };
+        let Some(ahbjtag_config) = jtag.ahbjtag.as_ref() else {
+            return Err(Error::Other(
+                "System bus interface requires an AHBJTAG target configuration".into(),
+            ));
+        };
+
+        // TODO(darsor): much of this is copied from attach_jtag. Pull out into separate method?
+        if let Some(scan_chain) = jtag.scan_chain.clone()
+            && let Some(probe) = probe.try_as_jtag_probe()
+        {
+            probe.set_scan_chain(&scan_chain)?;
+        }
+
+        probe.attach_to_unspecified()?;
+        if let Some(probe) = probe.try_as_jtag_probe()
+            && let Ok(chain) = probe.scan_chain()
+            && !chain.is_empty()
+        {
+            for core in &cores {
+                probe.select_target(core.jtag_tap_index())?;
+            }
+        }
+
+        let interfaces = match target.architecture() {
+            Architecture::Sparc => {
+                let mut bus_access = BusAccess::new_ahbjtag(probe, ahbjtag_config.clone())?;
+                let iface = Leon3DebugInterfaceState::try_attach(&mut bus_access)?;
+                ArchitectureInterface::SystemBus(bus_access, SystemBusInterface::Leon3(iface))
+            }
+            arch => {
+                return Err(Error::Probe(DebugProbeError::Other(format!(
+                    "Unsupported system bus core architecture {arch:?}",
+                ))));
+            }
+        };
+
+        Ok(Session {
+            target,
+            interfaces,
+            cores,
+            configured_trace_sink: None,
+        })
     }
 
     /// Automatically open a probe with the given session config.
@@ -880,6 +1001,9 @@ impl Session {
                     Architecture::Xtensa
                 }
             }
+            ArchitectureInterface::SystemBus(_, iface) => match iface {
+                SystemBusInterface::Leon3(_) => Architecture::Sparc,
+            },
         }
     }
 

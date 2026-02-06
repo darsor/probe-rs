@@ -8,7 +8,7 @@ use crate::{
     MemoryInterface,
     architecture::leon3::communication_interface::Leon3Error,
     memory::{InvalidDataLengthError, MemoryNotAlignedError, valid_32bit_address},
-    probe::{DebugProbeError, JtagAccess},
+    probe::{DebugProbeError, Probe},
 };
 
 const ADATA_LEN: u32 = 35;
@@ -19,37 +19,21 @@ const JTAG_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// AHBJTAG driver used to access the AHB bus through JTAG.
 #[derive(Debug)]
-pub struct AhbJtag<'probe> {
-    pub probe: &'probe mut dyn JtagAccess,
-    state: &'probe mut AhbJtagState,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct AhbJtagConfig {
-    adata_addr: u32,
-    ddata_addr: u32,
-}
-
-impl AhbJtagConfig {
-    pub fn new(adata_addr: u32, ddata_addr: u32) -> Self {
-        Self {
-            adata_addr,
-            ddata_addr,
-        }
-    }
+pub struct AhbJtag {
+    probe: Probe,
+    config: probe_rs_target::AhbJtag,
+    state: AhbJtagState,
 }
 
 #[derive(Debug)]
 pub struct AhbJtagState {
-    config: AhbJtagConfig,
     current_transaction_size: Option<TransactionSize>,
     current_transaction_kind: Option<TransactionKind>,
 }
 
 impl AhbJtagState {
-    pub fn new(config: AhbJtagConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            config,
             current_transaction_size: None,
             current_transaction_kind: None,
         }
@@ -162,9 +146,17 @@ enum TransactionOutcome {
     Pending,
 }
 
-impl<'probe> AhbJtag<'probe> {
-    pub fn new(probe: &'probe mut dyn JtagAccess, state: &'probe mut AhbJtagState) -> Self {
-        Self { probe, state }
+impl AhbJtag {
+    pub fn new(probe: Probe, config: probe_rs_target::AhbJtag) -> Self {
+        Self {
+            probe,
+            config,
+            state: AhbJtagState::new(),
+        }
+    }
+
+    pub fn as_probe(&mut self) -> &mut Probe {
+        &mut self.probe
     }
 
     fn write_adata(
@@ -177,7 +169,9 @@ impl<'probe> AhbJtag<'probe> {
         cmd[0] = (kind.encode() << 2) | size.encode();
         cmd[1..].copy_from_slice(&address.to_be_bytes());
         self.probe
-            .write_register(self.state.config.adata_addr, &cmd, ADATA_LEN)?;
+            .try_as_jtag_probe()
+            .expect("Should be JTAG probe")
+            .write_register(self.config.adata_addr, &cmd, ADATA_LEN)?;
         self.state.current_transaction_kind = Some(kind);
         self.state.current_transaction_size = Some(size);
         Ok(())
@@ -203,9 +197,11 @@ impl<'probe> AhbJtag<'probe> {
         let start_time = Instant::now();
         loop {
             // read DDATA
-            let result =
-                self.probe
-                    .write_register(self.state.config.ddata_addr, &shift_in, DDATA_LEN)?;
+            let result = self
+                .probe
+                .try_as_jtag_probe()
+                .expect("Should be JTAG probe")
+                .write_register(self.config.ddata_addr, &shift_in, DDATA_LEN)?;
 
             // interpret the result
             match self.transform_ddata_result(&result) {
@@ -253,9 +249,11 @@ impl<'probe> AhbJtag<'probe> {
         let start_time = Instant::now();
         loop {
             // write DDATA
-            let result =
-                self.probe
-                    .write_register(self.state.config.ddata_addr, &shift_in, DDATA_LEN)?;
+            let result = self
+                .probe
+                .try_as_jtag_probe()
+                .expect("Should be JTAG probe")
+                .write_register(self.config.ddata_addr, &shift_in, DDATA_LEN)?;
 
             // interpret the result
             match self.transform_ddata_result(&result) {
@@ -432,7 +430,7 @@ fn check_alignment(address: u64, alignment: u64) -> Result<(), crate::Error> {
     Ok(())
 }
 
-impl<'probe> MemoryInterface for AhbJtag<'probe> {
+impl MemoryInterface for AhbJtag {
     fn supports_native_64bit_access(&mut self) -> bool {
         false
     }

@@ -11,7 +11,7 @@ use crate::{
     memory::CoreMemoryInterface,
 };
 
-mod ahbjtag;
+pub mod ahbjtag;
 pub mod communication_interface;
 mod dsu3;
 mod plugnplay;
@@ -198,10 +198,10 @@ impl<'state> CoreMemoryInterface for Leon3<'state> {
     type ErrorType = crate::Error;
 
     fn memory(&self) -> &dyn crate::MemoryInterface<Self::ErrorType> {
-        &self.interface.ahb
+        self.interface.as_memory_interface()
     }
 
     fn memory_mut(&mut self) -> &mut dyn crate::MemoryInterface<Self::ErrorType> {
-        &mut self.interface.ahb
+        self.interface.as_memory_interface_mut()
     }
 }

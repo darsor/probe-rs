@@ -1,11 +1,11 @@
 use crate::{
-    Error as ProbeRsError, Target,
+    Error as ProbeRsError, MemoryInterface,
     architecture::leon3::{
-        ahbjtag::{AhbJtag, AhbJtagConfig, AhbJtagState},
-        dsu3::{Dsu3, Dsu3State},
+        dsu3::{Dsu3, Dsu3State, DsuCtrl},
         plugnplay::{Device, GaislerDevice, PlugnPlayState},
     },
-    probe::{DebugProbeError, JtagAccess},
+    probe::DebugProbeError,
+    session::BusAccess,
 };
 
 /// Some error occurred when working with the Leon3 core.
@@ -42,27 +42,42 @@ impl From<Leon3Error> for ProbeRsError {
 #[derive(Debug)]
 pub struct Leon3CommunicationInterface<'state> {
     dsu: Dsu3<'state>,
-    pub(super) ahb: AhbJtag<'state>,
+    probe: &'state mut BusAccess,
     plugnplay: &'state PlugnPlayState,
 }
 
 impl<'state> Leon3CommunicationInterface<'state> {
-    /// Create the Leon3 communication interface using the JTAG probe driver
-    pub fn new(
-        probe: &'state mut dyn JtagAccess,
+    pub fn try_attach(
+        probe: &'state mut BusAccess,
         state: &'state mut Leon3DebugInterfaceState,
-    ) -> Self {
+    ) -> Result<Self, crate::Error> {
         let Leon3DebugInterfaceState {
             dsu_state,
-            ahbjtag_state,
             plugnplay,
         } = state;
+        let dsu = Dsu3::try_attach(dsu_state, probe)?;
 
-        Self {
-            dsu: Dsu3::new(dsu_state),
-            ahb: AhbJtag::new(probe, ahbjtag_state),
+        Ok(Self {
+            dsu,
+            probe,
             plugnplay,
-        }
+        })
+    }
+
+    pub fn as_memory_interface(&self) -> &dyn MemoryInterface {
+        self.probe
+    }
+
+    pub fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface {
+        self.probe
+    }
+
+    pub(crate) fn core_halted(&mut self) -> Result<bool, crate::Error> {
+        Ok(self.dsu.read_dsu_reg::<DsuCtrl>(self.probe)?.hl())
+    }
+
+    pub(crate) fn core_in_debug_mode(&mut self) -> Result<bool, crate::Error> {
+        Ok(self.dsu.read_dsu_reg::<DsuCtrl>(self.probe)?.dm())
     }
 }
 
@@ -70,27 +85,14 @@ impl<'state> Leon3CommunicationInterface<'state> {
 #[derive(Debug)]
 pub(crate) struct Leon3DebugInterfaceState {
     dsu_state: Dsu3State,
-    ahbjtag_state: AhbJtagState,
     plugnplay: PlugnPlayState,
 }
 
 impl Leon3DebugInterfaceState {
     pub fn try_attach<'probe>(
-        probe: &'probe mut dyn JtagAccess,
-        target: &'probe Target,
+        probe: &'probe mut dyn MemoryInterface,
     ) -> Result<Self, crate::Error> {
-        let probe_rs_target::AhbJtag {
-            adata_addr,
-            ddata_addr,
-        } = target
-            .jtag
-            .as_ref()
-            .and_then(|j| j.ahbjtag.as_ref())
-            .ok_or(DebugProbeError::Other("AHBJTAG not configured".to_string()))?;
-        let ahbjtag_config = AhbJtagConfig::new(*adata_addr, *ddata_addr);
-        let mut ahbjtag_state = AhbJtagState::new(ahbjtag_config);
-        let mut ahbjtag = AhbJtag::new(probe, &mut ahbjtag_state);
-        let plugnplay = PlugnPlayState::scan_plugnplay(&mut ahbjtag)?;
+        let plugnplay = PlugnPlayState::scan_plugnplay(probe)?;
         let dsu_record = plugnplay
             .find_device(Device::Gaisler(GaislerDevice::LEON3DSU))
             .ok_or(Leon3Error::Dsu3NotFound)?;
@@ -105,7 +107,6 @@ impl Leon3DebugInterfaceState {
 
         Ok(Self {
             dsu_state: Dsu3State::new(dsu_base_address),
-            ahbjtag_state: AhbJtagState::new(ahbjtag_config),
             plugnplay: plugnplay,
         })
     }

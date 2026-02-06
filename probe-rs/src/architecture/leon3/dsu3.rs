@@ -1,4 +1,4 @@
-use crate::memory_mapped_bitfield_register;
+use crate::{MemoryInterface, MemoryMappedRegister, memory_mapped_bitfield_register};
 
 #[derive(Debug)]
 pub(crate) struct Dsu3<'state> {
@@ -6,19 +6,61 @@ pub(crate) struct Dsu3<'state> {
 }
 
 impl<'state> Dsu3<'state> {
-    pub fn new(state: &'state mut Dsu3State) -> Self {
-        Self { state }
+    pub fn try_attach(
+        state: &'state mut Dsu3State,
+        ahb: &mut dyn MemoryInterface,
+    ) -> Result<Self, crate::Error> {
+        let this = Self { state };
+        if !this.state.initialized {
+            this.modify_dsu_reg::<DsuCtrl, _>(ahb, |ctrl| {
+                ctrl.set_bw(true);
+            })?;
+            this.state.initialized = true;
+        }
+        Ok(this)
+    }
+
+    pub fn read_dsu_reg<R: MemoryMappedRegister<u32>>(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+    ) -> Result<R, crate::Error> {
+        let addr = R::get_mmio_address_from_base(self.state.base_addr)?;
+        Ok(R::from(ahb.read_word_32(addr)?))
+    }
+
+    pub fn write_dsu_reg<R: MemoryMappedRegister<u32>>(
+        &self,
+        value: R,
+        ahb: &mut dyn MemoryInterface,
+    ) -> Result<(), crate::Error> {
+        let addr = R::get_mmio_address_from_base(self.state.base_addr)?;
+        ahb.write_word_32(addr, value.into())
+    }
+
+    pub fn modify_dsu_reg<R: MemoryMappedRegister<u32>, T>(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+        f: impl Fn(&mut R) -> T,
+    ) -> Result<T, crate::Error> {
+        let mut value = self.read_dsu_reg::<R>(ahb)?;
+        let result = f(&mut value);
+        self.write_dsu_reg(value, ahb)?;
+        Ok(result)
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Dsu3State {
-    base_addr: u32,
+    base_addr: u64,
+    initialized: bool,
 }
 
 impl Dsu3State {
     pub(crate) fn new(base_addr: u32) -> Self {
-        Self { base_addr }
+        Self {
+            base_addr: base_addr as u64,
+            initialized: false,
+        }
     }
 }
 
@@ -26,40 +68,40 @@ memory_mapped_bitfield_register! {
     /// DSU Control Register (GRLIB IP Core User's Manual 32.6.1)
     ///
     /// The DSU is controlled by the DSU control register.
-    struct DsuCtrl(u32);
+    pub struct DsuCtrl(u32);
     0x00, "dsu_ctrl",
     impl From;
     /// Power down (PW) - Returns ‘1’ when processor is in power-down mode.
-    pw, _: 11;
+    pub pw, _: 11;
     /// Processor halt (HL) - Returns ‘1’ on read when processor is halted. If the processor is in debug
     /// mode, setting this bit will put the processor in halt mode.
-    hl, set_hl: 10;
+    pub hl, set_hl: 10;
     /// Processor error mode (PE) - returns ‘1’ on read when processor is in error mode, else ‘0’. If written
     /// with ‘1’, it will clear the error and halt mode.
-    pe, set_pe: 9;
+    pub pe, set_pe: 9;
     /// External Break (EB) - Value of the external DSUBRE signal (read-only)
-    eb, _: 8;
+    pub eb, _: 8;
     /// External Enable (EE) - Value of the external DSUEN signal (read-only)
-    ee, _: 7;
+    pub ee, _: 7;
     /// Debug mode (DM) - Indicates when the processor has entered debug mode (read-only).
-    dm, _: 6;
+    pub dm, _: 6;
     /// Break on error traps (BZ) - if set, will force the processor into debug mode on all except the
     /// following traps: priviledged_instruction, fpu_disabled, window_overflow, window_underflow,
     /// asynchronous_interrupt, ticc_trap.
-    bz, set_bz: 5;
+    pub bz, set_bz: 5;
     /// Break on trap (BX) - if set, will force the processor into debug mode when any trap occurs.
-    bx, set_bx: 4;
+    pub bx, set_bx: 4;
     /// Break on S/W breakpoint (BS) - if set, debug mode will be forced when an breakpoint instruction
     /// (ta 1) is executed.
-    bs, set_bs: 3;
+    pub bs, set_bs: 3;
     /// Break on IU watchpoint (BW) - if set, debug mode will be forced on a IU watchpoint (trap 0xb).
-    bw, set_bw: 2;
+    pub bw, set_bw: 2;
     /// Break on error (BE) - if set, will force the processor to debug mode when the processor would have
     /// entered error condition (trap in trap).
-    be, set_be: 1;
+    pub be, set_be: 1;
     /// Trace enable (TE) - Enables instruction tracing. If set the instructions will be stored in the trace
     /// buffer. Remains set when then processor enters debug or error mode
-    te, set_te: 0;
+    pub te, set_te: 0;
 }
 
 memory_mapped_bitfield_register! {
@@ -68,7 +110,7 @@ memory_mapped_bitfield_register! {
     /// This register is used to break or single step the processor(s). This register
     /// controls all processors in a multi-processor system, and is only accessible
     /// in the DSU memory map of processor 0.
-    struct DsuBrss(u32);
+    pub struct DsuBrss(u32);
     0x20, "dsu_brss",
     impl From;
     /// Single step (SSx) - if set, the processor x will execute one instruction and return to debug mode. The
@@ -76,10 +118,10 @@ memory_mapped_bitfield_register! {
     /// branch with the annul bit set, and if the delay instruction is effectively annulled, the processor will
     /// execute the branch, the annulled delay instruction and the instruction thereafter before returning to
     /// debug mode.
-    bool, ss, set_ss: 16, 16, 16;
+    pub bool, ss, set_ss: 16, 16, 16;
     /// Break now (BNx) - Force processor x into debug mode if the Break on watchpoint (BW) bit in the
     /// processors DSU control register is set. If cleared, the processor x will resume execution.
-    bool, bn, set_bn: 0, 0, 16;
+    pub bool, bn, set_bn: 0, 0, 16;
 }
 
 memory_mapped_bitfield_register! {
