@@ -245,7 +245,7 @@ impl CombinedCoreState {
             self.id,
             name,
             target,
-            crate::architecture::leon3::Leon3::new(interface, s, debug_sequence)?,
+            crate::architecture::leon3::Leon3::new(self.id, interface, s, debug_sequence)?,
         ))
     }
 

@@ -20,6 +20,7 @@ pub mod sequences;
 
 /// An interface to operate a LEON3 core.
 pub struct Leon3<'state> {
+    core_index: usize,
     interface: Leon3CommunicationInterface<'state>,
     state: &'state mut Leon3CoreState,
     sequence: Arc<dyn Leon3DebugSequence>,
@@ -27,15 +28,22 @@ pub struct Leon3<'state> {
 
 impl<'state> Leon3<'state> {
     pub fn new(
+        core_index: usize,
         interface: Leon3CommunicationInterface<'state>,
         state: &'state mut Leon3CoreState,
         sequence: Arc<dyn Leon3DebugSequence>,
     ) -> Result<Self, crate::Error> {
-        let this = Self {
+        let mut this = Self {
+            core_index,
             interface,
             state,
             sequence,
         };
+
+        if !this.state.initialized {
+            this.interface.on_first_attach(this.core_index);
+            this.state.initialized = true;
+        }
 
         // TODO(darsor)
         // this.on_attach()?;
@@ -47,13 +55,14 @@ impl<'state> Leon3<'state> {
 /// Leon3 core state.
 #[derive(Debug)]
 pub struct Leon3CoreState {
-    // TODO(darsor)
+    /// Whether the first-attach initialization has been performed
+    initialized: bool,
 }
 
 impl Leon3CoreState {
     /// Creates a new [`Leon3CoreState`].
     pub(crate) fn new() -> Self {
-        Self {}
+        Self { initialized: false }
     }
 }
 
@@ -63,7 +72,13 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn core_halted(&mut self) -> Result<bool, crate::Error> {
-        todo!()
+        // TODO(darsor): the core can be halted in more than one way?
+        let debug_mode = self.interface.core_in_debug_mode(self.core_index)?;
+        if debug_mode {
+            Ok(true)
+        } else {
+            self.interface.core_halted(self.core_index)
+        }
     }
 
     fn status(&mut self) -> Result<crate::CoreStatus, crate::Error> {

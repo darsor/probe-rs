@@ -1,30 +1,36 @@
-use crate::{MemoryInterface, MemoryMappedRegister, memory_mapped_bitfield_register};
+use crate::{
+    MemoryInterface, MemoryMappedRegister,
+    architecture::leon3::communication_interface::Leon3Error, memory_mapped_bitfield_register,
+};
 
 #[derive(Debug)]
 pub(crate) struct Dsu3<'state> {
+    /// DSU3 state (not for any specific core)
     state: &'state mut Dsu3State,
 }
 
 impl<'state> Dsu3<'state> {
-    pub fn try_attach(
-        state: &'state mut Dsu3State,
-        ahb: &mut dyn MemoryInterface,
-    ) -> Result<Self, crate::Error> {
-        let this = Self { state };
-        if !this.state.initialized {
-            this.modify_dsu_reg::<DsuCtrl, _>(ahb, |ctrl| {
-                ctrl.set_bw(true);
-            })?;
-            this.state.initialized = true;
+    pub fn new(state: &'state mut Dsu3State) -> Self {
+        Self { state }
+    }
+
+    /// Base address of the registers for controlling a single core.
+    ///
+    /// NOTE: Some registers are only implemented for core 0 and have bits
+    /// for each available core.
+    fn base_address(&self, core_index: usize) -> Result<u64, Leon3Error> {
+        if core_index >= 16 {
+            return Err(Leon3Error::CoreOutOfRange { core_index });
         }
-        Ok(this)
+        Ok(self.state.base_addr + (core_index as u64) << 24)
     }
 
     pub fn read_dsu_reg<R: MemoryMappedRegister<u32>>(
         &self,
         ahb: &mut dyn MemoryInterface,
+        core_index: usize,
     ) -> Result<R, crate::Error> {
-        let addr = R::get_mmio_address_from_base(self.state.base_addr)?;
+        let addr = R::get_mmio_address_from_base(self.base_address(core_index)?)?;
         Ok(R::from(ahb.read_word_32(addr)?))
     }
 
@@ -32,35 +38,35 @@ impl<'state> Dsu3<'state> {
         &self,
         value: R,
         ahb: &mut dyn MemoryInterface,
+        core_index: usize,
     ) -> Result<(), crate::Error> {
-        let addr = R::get_mmio_address_from_base(self.state.base_addr)?;
+        let addr = R::get_mmio_address_from_base(self.base_address(core_index)?)?;
         ahb.write_word_32(addr, value.into())
     }
 
     pub fn modify_dsu_reg<R: MemoryMappedRegister<u32>, T>(
         &self,
         ahb: &mut dyn MemoryInterface,
+        core_index: usize,
         f: impl Fn(&mut R) -> T,
     ) -> Result<T, crate::Error> {
-        let mut value = self.read_dsu_reg::<R>(ahb)?;
+        let mut value = self.read_dsu_reg::<R>(ahb, core_index)?;
         let result = f(&mut value);
-        self.write_dsu_reg(value, ahb)?;
+        self.write_dsu_reg(value, ahb, core_index)?;
         Ok(result)
     }
 }
 
+/// State of the DSU3 (not for any specific core).
 #[derive(Debug)]
 pub(crate) struct Dsu3State {
+    /// Base address of the DSU3 addresss space
     base_addr: u64,
-    initialized: bool,
 }
 
 impl Dsu3State {
-    pub(crate) fn new(base_addr: u32) -> Self {
-        Self {
-            base_addr: base_addr as u64,
-            initialized: false,
-        }
+    pub(crate) fn new(base_addr: u64) -> Self {
+        Self { base_addr }
     }
 }
 

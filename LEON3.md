@@ -55,3 +55,48 @@ DDATA:
 "For both reads and writes, accesses are nominally initiated when the TAP enters the Update-DR state.
 However, a few extra TCK cycles may be needed before this information reaches the AMBA clock
 domain"
+
+## Overview of Structs and State
+
+`Session`
+- Main user handle for a session.
+- Owns the `ArchitectureInterface` and `CombinedCoreState`s
+- The `core` method returns a temporary `Core` struct by
+  - Calling `ArchitectureInterface::attach`, which creates a `LeonCommunicationInterface` and gives it to `CombinedCoreState::attach_leon3`
+
+`ArchitectureInterface::SystemBusInterface`
+- Owned by the `Session`
+- Owns the `Probe` and `Leon3DebugInterfaceState`
+- The `attach` method takes a mutable reference to `CombinedCoreState` and produces a `Core`.
+ 
+`Leon3DebugInterfaceState`
+- Session-persistent state for the interface itself (no core-specific state)
+- Owned by the `ArchitectureInterface`
+- Owns the results of the Plug&Play scan and `Dsu3State`
+- Destructured to provide references for the `Leon3CommunicationInterface`
+
+`CombinedCoreState`
+- Persistent core-specific state for the session.
+- Owns the generic `CoreState` and `Leon3CoreState`
+- Has a core id
+- `attach_leon3` method produces a `Core`.
+
+`Leon3CoreState`
+- Leon3-specific core state, for just a single core
+
+`Leon3CommunicationInterface`
+- Temporary struct just holding references to other state/structs
+- Notably does not hold any core-specific state, only interface state
+- References:
+  - Probe
+  - Dsu
+  - Plug&Play records
+
+`Core`
+- Temporary struct, main user interface to controlling a single core
+- Has a Boxed reference to the `Leon3` as a `dyn CoreInterface`.
+
+`Leon3`
+- Main internal handle for a Leon3 core, implements `CoreInterface` and `MemoryInterface` traits.
+- Is a temporary struct, just holds references to state
+- Owns a (temporary) `Leon3CommunicationInterface` and reference to the `Leon3CoreState`.
