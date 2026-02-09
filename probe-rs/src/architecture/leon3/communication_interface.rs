@@ -46,6 +46,12 @@ impl From<Leon3Error> for ProbeRsError {
 /// An interface that implements controls for Leon3 cores.
 #[derive(Debug)]
 pub struct Leon3CommunicationInterface<'state> {
+    /// Which core we are controlling.
+    ///
+    /// Everything else in this struct specifically for the communication interface
+    /// and doesn't change for different cores, but this temporary struct is constructed
+    /// anew for each core we talk to.
+    core_index: usize,
     probe: &'state mut BusAccess,
     dsu: Dsu3<'state>,
     plugnplay: &'state PlugnPlayState,
@@ -53,6 +59,7 @@ pub struct Leon3CommunicationInterface<'state> {
 
 impl<'state> Leon3CommunicationInterface<'state> {
     pub fn try_attach(
+        core_index: usize,
         probe: &'state mut BusAccess,
         state: &'state mut Leon3DebugInterfaceState,
     ) -> Result<Self, crate::Error> {
@@ -63,6 +70,7 @@ impl<'state> Leon3CommunicationInterface<'state> {
         let dsu = Dsu3::new(dsu_state);
 
         Ok(Self {
+            core_index,
             probe,
             dsu,
             plugnplay,
@@ -77,48 +85,41 @@ impl<'state> Leon3CommunicationInterface<'state> {
         self.probe
     }
 
-    pub(crate) fn on_first_attach(&mut self, core_index: usize) -> Result<(), crate::Error> {
+    pub(crate) fn on_first_attach(&mut self) -> Result<(), crate::Error> {
         // From DSU3 section in GRLIB IP Core User's Manual:
         //   For the break-now BN bit to have effect the Break-on-IU-watchpoint
         //   (BW) bit must be set in the DSU control register.  This bit should
         //   be set by debug monitor software when initializing the DSU.
         Ok(self
             .dsu
-            .modify_dsu_reg::<DsuCtrl, _>(self.probe, core_index, |ctrl| {
+            .modify_dsu_reg::<DsuCtrl, _>(self.probe, self.core_index, |ctrl| {
                 ctrl.set_bw(true);
             })?)
     }
 
-    pub(crate) fn core_halted(&mut self, core_index: usize) -> Result<bool, crate::Error> {
+    pub(crate) fn core_halted(&mut self) -> Result<bool, crate::Error> {
         Ok(self
             .dsu
-            .read_dsu_reg::<DsuCtrl>(self.probe, core_index)?
+            .read_dsu_reg::<DsuCtrl>(self.probe, self.core_index)?
             .hl())
     }
 
-    pub(crate) fn core_in_debug_mode(&mut self, core_index: usize) -> Result<bool, crate::Error> {
+    pub(crate) fn core_in_debug_mode(&mut self) -> Result<bool, crate::Error> {
         Ok(self
             .dsu
-            .read_dsu_reg::<DsuCtrl>(self.probe, core_index)?
+            .read_dsu_reg::<DsuCtrl>(self.probe, self.core_index)?
             .dm())
     }
 
-    pub(crate) fn core_halted_or_debug_mode(
-        &mut self,
-        core_index: usize,
-    ) -> Result<bool, crate::Error> {
+    pub(crate) fn core_halted_or_debug_mode(&mut self) -> Result<bool, crate::Error> {
         todo!()
     }
 
-    pub(crate) fn wait_for_core_halted(
-        &mut self,
-        core_index: usize,
-        timeout: Duration,
-    ) -> Result<(), crate::Error> {
+    pub(crate) fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
 
-        while !self.core_halted(core_index)? {
+        while !self.core_halted()? {
             if start.elapsed() >= timeout {
                 return Err(crate::Error::Leon3(Leon3Error::Timeout));
             }

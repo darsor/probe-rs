@@ -28,6 +28,7 @@ pub struct Leon3<'state> {
 
 impl<'state> Leon3<'state> {
     pub fn new(
+        // TODO(darsor): is this used?
         core_index: usize,
         interface: Leon3CommunicationInterface<'state>,
         state: &'state mut Leon3CoreState,
@@ -41,7 +42,7 @@ impl<'state> Leon3<'state> {
         };
 
         if !this.state.initialized {
-            this.interface.on_first_attach(this.core_index);
+            this.interface.on_first_attach();
             this.state.initialized = true;
         }
 
@@ -73,11 +74,11 @@ impl<'state> CoreInterface for Leon3<'state> {
 
     fn core_halted(&mut self) -> Result<bool, crate::Error> {
         // TODO(darsor): the core can be halted in more than one way?
-        let debug_mode = self.interface.core_in_debug_mode(self.core_index)?;
+        let debug_mode = self.interface.core_in_debug_mode()?;
         if debug_mode {
             Ok(true)
         } else {
-            self.interface.core_halted(self.core_index)
+            self.interface.core_halted()
         }
     }
 

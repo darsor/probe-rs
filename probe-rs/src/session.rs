@@ -215,7 +215,8 @@ impl ArchitectureInterface {
             }
             ArchitectureInterface::SystemBus(probe, interface) => match interface {
                 SystemBusInterface::Leon3(state) => {
-                    let iface = Leon3CommunicationInterface::try_attach(probe, state)?;
+                    let iface =
+                        Leon3CommunicationInterface::try_attach(combined_state.id, probe, state)?;
                     combined_state.attach_leon3(target, iface)
                 }
             },
