@@ -100,3 +100,41 @@ domain"
 - Main internal handle for a Leon3 core, implements `CoreInterface` and `MemoryInterface` traits.
 - Is a temporary struct, just holds references to state
 - Owns a (temporary) `Leon3CommunicationInterface` and reference to the `Leon3CoreState`.
+
+## Halted States
+
+Error Mode
+  - Trap from a trap
+  - Application terminated
+  - PE bit in DsuCtrl, writing 1 clears error/halt mode
+  - if BE in DsuCtrl is set, enters debug mode (instead of/in addition to?) error mode
+Power-down
+  - PW bit in DsuCtrl
+Debug Mode
+  - DM bit in DsuCtrl
+Halted... how does this relate to other modes?
+  - HL bit in DsuCtrl (can be used to halt from debug mode?)
+
+Entering debug mode can happen when:
+  * Executed bp instruction (ta 1)
+    - BS bit in DsuCtrl: enter debug mode when ta 1 is executed
+  * IU hardware watchpoint/breakpoint (trap 0xb)
+    - BW bit in DsuCtrl: enter debug mode on trap 0xb
+    - Trap 0xb also triggered by BN bit
+    - ASR17 reads back number of implemented HW watchpoints
+    - ASR24-31 control HW watchpoints
+    - HW watchpoints can be used independently of the DSU
+  * External break signal (DSUBRE)
+    - EB bit in DsuCtrl
+  * Setting the BNx bit in DsuBrss
+  * A trap that would cause the processor to enter error mode
+    - Some bit to enable this?
+  * Traps defined in DsuCtrl
+    - BZ bit in DsuCtrl: break on unexpected/error traps
+    - BX bit in DsuCtrl: break on any trap
+  * Single-step
+    - SSx bit in DsuBrss: set to single-step and return to debug mode. Remains set.
+  * Another processor entered debug mode
+  * DSU AHB breakpoint or watchpoint
+
+Exit debug mode by clearing the BN bit in DsuCtrl

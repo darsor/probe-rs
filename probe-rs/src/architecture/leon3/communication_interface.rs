@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    Error as ProbeRsError, MemoryInterface,
+    Error as ProbeRsError, MemoryInterface, MemoryMappedRegister,
     architecture::leon3::{
         dsu3::{Dsu3, Dsu3State, DsuCtrl},
         plugnplay::{Device, GaislerDevice, PlugnPlayState},
@@ -53,7 +53,7 @@ pub struct Leon3CommunicationInterface<'state> {
     /// anew for each core we talk to.
     core_index: usize,
     probe: &'state mut BusAccess,
-    dsu: Dsu3<'state>,
+    pub(crate) dsu: Dsu3<'state>,
     plugnplay: &'state PlugnPlayState,
 }
 
@@ -92,27 +92,37 @@ impl<'state> Leon3CommunicationInterface<'state> {
         //   be set by debug monitor software when initializing the DSU.
         Ok(self
             .dsu
-            .modify_dsu_reg::<DsuCtrl, _>(self.probe, self.core_index, |ctrl| {
+            .modify_reg::<DsuCtrl, _>(self.probe, self.core_index, |ctrl| {
                 ctrl.set_bw(true);
             })?)
     }
 
     pub(crate) fn core_halted(&mut self) -> Result<bool, crate::Error> {
-        Ok(self
-            .dsu
-            .read_dsu_reg::<DsuCtrl>(self.probe, self.core_index)?
-            .hl())
+        let ctrl: DsuCtrl = self.read_dsu_reg()?;
+        Ok(ctrl.hl() || ctrl.pe() || ctrl.dm())
     }
 
     pub(crate) fn core_in_debug_mode(&mut self) -> Result<bool, crate::Error> {
-        Ok(self
-            .dsu
-            .read_dsu_reg::<DsuCtrl>(self.probe, self.core_index)?
-            .dm())
+        let ctrl: DsuCtrl = self.read_dsu_reg()?;
+        Ok(ctrl.dm())
     }
 
-    pub(crate) fn core_halted_or_debug_mode(&mut self) -> Result<bool, crate::Error> {
-        todo!()
+    pub(crate) fn read_dsu_reg<R: MemoryMappedRegister<u32>>(&mut self) -> Result<R, crate::Error> {
+        self.dsu.read_reg(self.probe, self.core_index)
+    }
+
+    pub(crate) fn write_dsu_reg<R: MemoryMappedRegister<u32>>(
+        &mut self,
+        value: R,
+    ) -> Result<(), crate::Error> {
+        self.dsu.write_reg(value, self.probe, self.core_index)
+    }
+
+    pub fn modify_dsu_reg<R: MemoryMappedRegister<u32>, T>(
+        &mut self,
+        f: impl Fn(&mut R) -> T,
+    ) -> Result<T, crate::Error> {
+        self.dsu.modify_reg(self.probe, self.core_index, f)
     }
 
     pub(crate) fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {

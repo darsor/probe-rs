@@ -4,9 +4,11 @@
 use std::sync::Arc;
 
 use crate::{
-    CoreInterface,
+    CoreInterface, CoreStatus, HaltReason,
     architecture::leon3::{
-        communication_interface::Leon3CommunicationInterface, sequences::Leon3DebugSequence,
+        communication_interface::Leon3CommunicationInterface,
+        dsu3::{DsuBrss, DsuCtrl},
+        sequences::Leon3DebugSequence,
     },
     memory::CoreMemoryInterface,
 };
@@ -82,7 +84,36 @@ impl<'state> CoreInterface for Leon3<'state> {
         }
     }
 
-    fn status(&mut self) -> Result<crate::CoreStatus, crate::Error> {
+    fn status(&mut self) -> Result<CoreStatus, crate::Error> {
+        // TODO(darsor): check on hardware if BN is always set when debug mode is entered
+        let ctrl: DsuCtrl = self.interface.read_dsu_reg()?;
+        if ctrl.pw() {
+            return Ok(CoreStatus::Sleeping);
+        }
+        if self.core_halted()? {
+            // TODO(darsor): ensure debug mode
+            let brss: DsuBrss = self.interface.read_dsu_reg()?;
+            if ctrl.pe() {
+                return Ok(CoreStatus::Halted(HaltReason::Exception));
+            }
+            if brss.ss(self.core_index) {
+                // TODO(darsor): when to clear this bit?
+                return Ok(CoreStatus::Halted(HaltReason::Step));
+            }
+            // TODO(darsor): check PC and see if executed bp instruction?
+            // let pc = self.read_core_reg(registers::PC.id())?;
+
+            // TODO(darsor): check LEON3 registers for hardware watchpoint?
+
+            // TODO(darsor): check PC and see if executed bp instruction?
+
+            // TODO(darsor): otherwise if BN is set then it was probably a request
+            // else {
+            //     return Ok(CoreStatus::Halted(HaltReason::Request));
+            // }
+        } else {
+            return Ok(CoreStatus::Running);
+        }
         todo!()
     }
 
@@ -152,19 +183,19 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn program_counter(&self) -> &'static crate::CoreRegister {
-        todo!()
+        &registers::PC
     }
 
     fn frame_pointer(&self) -> &'static crate::CoreRegister {
-        todo!()
+        &registers::FP
     }
 
     fn stack_pointer(&self) -> &'static crate::CoreRegister {
-        todo!()
+        &registers::SP
     }
 
     fn return_address(&self) -> &'static crate::CoreRegister {
-        todo!()
+        &registers::RA
     }
 
     fn hw_breakpoints_enabled(&self) -> bool {
@@ -172,15 +203,15 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn architecture(&self) -> probe_rs_target::Architecture {
-        todo!()
+        probe_rs_target::Architecture::Sparc
     }
 
     fn core_type(&self) -> probe_rs_target::CoreType {
-        todo!()
+        probe_rs_target::CoreType::Sparc
     }
 
     fn instruction_set(&mut self) -> Result<probe_rs_target::InstructionSet, crate::Error> {
-        todo!()
+        Ok(probe_rs_target::InstructionSet::Sparc)
     }
 
     fn fpu_support(&mut self) -> Result<bool, crate::Error> {

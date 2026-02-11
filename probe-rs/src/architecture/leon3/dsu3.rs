@@ -1,6 +1,10 @@
 use crate::{
     MemoryInterface, MemoryMappedRegister,
-    architecture::leon3::communication_interface::Leon3Error, memory_mapped_bitfield_register,
+    architecture::leon3::{
+        communication_interface::Leon3Error,
+        registers::{IuCoreReg, Leon3RegisterId},
+    },
+    memory_mapped_bitfield_register,
 };
 
 #[derive(Debug)]
@@ -25,7 +29,7 @@ impl<'state> Dsu3<'state> {
         Ok(self.state.base_addr + (core_index as u64) << 24)
     }
 
-    pub fn read_dsu_reg<R: MemoryMappedRegister<u32>>(
+    pub fn read_reg<R: MemoryMappedRegister<u32>>(
         &self,
         ahb: &mut dyn MemoryInterface,
         core_index: usize,
@@ -34,7 +38,7 @@ impl<'state> Dsu3<'state> {
         Ok(R::from(ahb.read_word_32(addr)?))
     }
 
-    pub fn write_dsu_reg<R: MemoryMappedRegister<u32>>(
+    pub fn write_reg<R: MemoryMappedRegister<u32>>(
         &self,
         value: R,
         ahb: &mut dyn MemoryInterface,
@@ -44,15 +48,15 @@ impl<'state> Dsu3<'state> {
         ahb.write_word_32(addr, value.into())
     }
 
-    pub fn modify_dsu_reg<R: MemoryMappedRegister<u32>, T>(
+    pub fn modify_reg<R: MemoryMappedRegister<u32>, T>(
         &self,
         ahb: &mut dyn MemoryInterface,
         core_index: usize,
         f: impl Fn(&mut R) -> T,
     ) -> Result<T, crate::Error> {
-        let mut value = self.read_dsu_reg::<R>(ahb, core_index)?;
+        let mut value = self.read_reg::<R>(ahb, core_index)?;
         let result = f(&mut value);
-        self.write_dsu_reg(value, ahb, core_index)?;
+        self.write_reg(value, ahb, core_index)?;
         Ok(result)
     }
 }
