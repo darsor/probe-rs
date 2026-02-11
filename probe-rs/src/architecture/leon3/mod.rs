@@ -1,13 +1,14 @@
 // TODO(darsor): pub use stuff that other architectures pub use
 // TODO(darsor): rename things from LEON3 to SPARC or SPARCV8 as appropriate
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
-    CoreInterface, CoreStatus, HaltReason,
+    CoreInterface, CoreStatus, HaltReason, RegisterId, RegisterValue,
     architecture::leon3::{
         communication_interface::Leon3CommunicationInterface,
         dsu3::{DsuBrss, DsuCtrl},
+        registers::Leon3RegisterId,
         sequences::Leon3DebugSequence,
     },
     memory::CoreMemoryInterface,
@@ -70,18 +71,12 @@ impl Leon3CoreState {
 }
 
 impl<'state> CoreInterface for Leon3<'state> {
-    fn wait_for_core_halted(&mut self, timeout: std::time::Duration) -> Result<(), crate::Error> {
-        todo!()
+    fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {
+        self.interface.wait_for_core_halted(timeout)
     }
 
     fn core_halted(&mut self) -> Result<bool, crate::Error> {
-        // TODO(darsor): the core can be halted in more than one way?
-        let debug_mode = self.interface.core_in_debug_mode()?;
-        if debug_mode {
-            Ok(true)
-        } else {
-            self.interface.core_halted()
-        }
+        self.interface.core_halted()
     }
 
     fn status(&mut self) -> Result<CoreStatus, crate::Error> {
@@ -99,6 +94,8 @@ impl<'state> CoreInterface for Leon3<'state> {
             if brss.ss(self.core_index) {
                 // TODO(darsor): when to clear this bit?
                 return Ok(CoreStatus::Halted(HaltReason::Step));
+            } else {
+                Ok(CoreStatus::Halted(HaltReason::Unknown))
             }
             // TODO(darsor): check PC and see if executed bp instruction?
             // let pc = self.read_core_reg(registers::PC.id())?;
@@ -114,27 +111,39 @@ impl<'state> CoreInterface for Leon3<'state> {
         } else {
             return Ok(CoreStatus::Running);
         }
-        todo!()
     }
 
-    fn halt(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> Result<crate::CoreInformation, crate::Error> {
-        todo!()
+    fn halt(&mut self, timeout: Duration) -> Result<crate::CoreInformation, crate::Error> {
+        self.interface.modify_dsu_reg(|reg: &mut DsuBrss| {
+            reg.set_bn(self.core_index, true);
+        })?;
+        self.wait_for_core_halted(timeout)?;
+        self.interface.core_info()
     }
 
     fn run(&mut self) -> Result<(), crate::Error> {
+        // TODO(darsor): return error if in halted/error state, only run if in debug mode
+        // TODO(darsor): clear BN bit
         todo!()
     }
 
     fn reset(&mut self) -> Result<(), crate::Error> {
+        // Register Reset values
+        // Trap Base Register       Trap Base Address field reset (value given by rstaddr VHDL generic)
+        // PC                       0x0 (rstaddr VHDL generic)
+        // nPC                      0x4 (rstaddr VHDL genericc + 4)
+        // PSR                      ET=0, S=1
+        // By default, the execution will start from address 0. This can be overridden by setting the rstaddr
+        // VHDL generic in the model to a non-zero value. The reset address is always aligned on a 4 KiB
+        // boundary. If rstaddr is set to 16#FFFFF#, then the reset address is taken from the signal IRQI.RST-
+        // VEC. This allows the reset address to be changed dynamically
+        // TODO(darsor): clear caches
         todo!()
     }
 
     fn reset_and_halt(
         &mut self,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> Result<crate::CoreInformation, crate::Error> {
         todo!()
     }
@@ -143,19 +152,21 @@ impl<'state> CoreInterface for Leon3<'state> {
         todo!()
     }
 
-    fn read_core_reg(
-        &mut self,
-        address: crate::RegisterId,
-    ) -> Result<crate::RegisterValue, crate::Error> {
-        todo!()
+    fn read_core_reg(&mut self, address: RegisterId) -> Result<RegisterValue, crate::Error> {
+        let leon3_address = Leon3RegisterId::try_from(address)?;
+        self.interface
+            .read_core_reg(leon3_address)
+            .map(RegisterValue::U32)
     }
 
     fn write_core_reg(
         &mut self,
-        address: crate::RegisterId,
-        value: crate::RegisterValue,
+        address: RegisterId,
+        value: RegisterValue,
     ) -> Result<(), crate::Error> {
-        todo!()
+        let leon3_address = Leon3RegisterId::try_from(address)?;
+        let value: u32 = value.try_into()?;
+        self.interface.write_core_reg(leon3_address, value)
     }
 
     fn available_breakpoint_units(&mut self) -> Result<u32, crate::Error> {
@@ -179,7 +190,7 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn registers(&self) -> &'static crate::CoreRegisters {
-        todo!()
+        &registers::LEON3_CORE_REGISTERS
     }
 
     fn program_counter(&self) -> &'static crate::CoreRegister {
@@ -223,11 +234,11 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn reset_catch_set(&mut self) -> Result<(), crate::Error> {
-        todo!()
+        Ok(self.sequence.reset_catch_set(&mut self.interface)?)
     }
 
     fn reset_catch_clear(&mut self) -> Result<(), crate::Error> {
-        todo!()
+        Ok(self.sequence.reset_catch_clear(&mut self.interface)?)
     }
 
     fn debug_core_stop(&mut self) -> Result<(), crate::Error> {

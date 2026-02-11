@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    Error as ProbeRsError, MemoryInterface, MemoryMappedRegister,
+    CoreInformation, Error as ProbeRsError, MemoryInterface, MemoryMappedRegister, RegisterId,
     architecture::leon3::{
-        dsu3::{Dsu3, Dsu3State, DsuCtrl},
+        dsu3::{Dsu3, Dsu3State, DsuCtrl, Psr},
         plugnplay::{Device, GaislerDevice, PlugnPlayState},
+        registers::Leon3RegisterId,
     },
     probe::DebugProbeError,
     session::BusAccess,
@@ -33,6 +34,12 @@ pub enum Leon3Error {
     /// Core out of range.
     #[error("Core index {core_index} out of range (max 15)")]
     CoreOutOfRange { core_index: usize },
+    /// Invalid register ID.
+    #[error("Invalid Register ID: {0:?}")]
+    InvalidRegisterId(RegisterId),
+    /// Reset halt request not supported by this chip.
+    #[error("Reset halt request not supported")]
+    ResetHaltRequestNotSupported,
 }
 
 impl From<Leon3Error> for ProbeRsError {
@@ -125,6 +132,40 @@ impl<'state> Leon3CommunicationInterface<'state> {
         self.dsu.modify_reg(self.probe, self.core_index, f)
     }
 
+    pub fn read_core_reg(&mut self, reg: Leon3RegisterId) -> Result<u32, crate::Error> {
+        match reg {
+            Leon3RegisterId::IuCore(iu_core_reg) => {
+                // TODO(darsor): cache this
+                let psr: Psr = self.read_dsu_reg()?;
+                let cwp = psr.cwp();
+                self.dsu
+                    .read_core_reg(iu_core_reg, self.probe, self.core_index, cwp)
+            }
+            Leon3RegisterId::IuSpecial(iu_special_reg) => {
+                self.dsu
+                    .read_special_reg(iu_special_reg, self.probe, self.core_index)
+            }
+            Leon3RegisterId::Fpu(_fpu_reg) => todo!(),
+        }
+    }
+
+    pub fn write_core_reg(&mut self, reg: Leon3RegisterId, value: u32) -> Result<(), crate::Error> {
+        match reg {
+            Leon3RegisterId::IuCore(iu_core_reg) => {
+                // TODO(darsor): cache this
+                let psr: Psr = self.read_dsu_reg()?;
+                let cwp = psr.cwp();
+                self.dsu
+                    .write_core_reg(iu_core_reg, value, self.probe, self.core_index, cwp)
+            }
+            Leon3RegisterId::IuSpecial(iu_special_reg) => {
+                self.dsu
+                    .write_special_reg(iu_special_reg, value, self.probe, self.core_index)
+            }
+            Leon3RegisterId::Fpu(_fpu_reg) => todo!(),
+        }
+    }
+
     pub(crate) fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
@@ -138,6 +179,12 @@ impl<'state> Leon3CommunicationInterface<'state> {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn core_info(&mut self) -> Result<CoreInformation, crate::Error> {
+        let pc: u32 = self.read_core_reg(super::registers::PC.id().try_into()?)?;
+
+        Ok(CoreInformation { pc: pc.into() })
     }
 }
 

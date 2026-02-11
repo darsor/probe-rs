@@ -2,7 +2,7 @@ use crate::{
     MemoryInterface, MemoryMappedRegister,
     architecture::leon3::{
         communication_interface::Leon3Error,
-        registers::{IuCoreReg, Leon3RegisterId},
+        registers::{IuCoreReg, IuSpecialReg},
     },
     memory_mapped_bitfield_register,
 };
@@ -59,6 +59,54 @@ impl<'state> Dsu3<'state> {
         self.write_reg(value, ahb, core_index)?;
         Ok(result)
     }
+
+    pub fn read_core_reg(
+        &self,
+        reg: IuCoreReg,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+        cwp: u32,
+    ) -> Result<u32, crate::Error> {
+        // TODO(darsor): may not always be 8, read from ASR17
+        let num_windows = 8;
+        let addr = self.base_address(core_index)? + reg.dsu3_addr(num_windows, cwp);
+        ahb.read_word_32(addr)
+    }
+
+    pub fn write_core_reg(
+        &self,
+        reg: IuCoreReg,
+        value: u32,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+        cwp: u32,
+    ) -> Result<(), crate::Error> {
+        // TODO(darsor): may not always be 8, read from ASR17
+        let num_windows = 8;
+        let addr = self.base_address(core_index)? + reg.dsu3_addr(num_windows, cwp);
+        ahb.write_word_32(addr, value)
+    }
+
+    pub fn read_special_reg(
+        &self,
+        reg: IuSpecialReg,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+    ) -> Result<u32, crate::Error> {
+        let addr = self.base_address(core_index)? + reg.dsu3_addr();
+        ahb.read_word_32(addr)
+    }
+
+    pub fn write_special_reg(
+        &self,
+        reg: IuSpecialReg,
+        value: u32,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+    ) -> Result<(), crate::Error> {
+        let addr = self.base_address(core_index)? + reg.dsu3_addr();
+        ahb.write_word_32(addr, value)
+    }
 }
 
 /// State of the DSU3 (not for any specific core).
@@ -71,6 +119,38 @@ pub(crate) struct Dsu3State {
 impl Dsu3State {
     pub(crate) fn new(base_addr: u64) -> Self {
         Self { base_addr }
+    }
+}
+
+impl IuCoreReg {
+    fn dsu3_addr(&self, num_windows: u32, cwp: u32) -> u64 {
+        fn addr(num_windows: u32, cwp: u32, offset: u64, n: u8) -> u64 {
+            0x30_0000
+                + ((u64::from(cwp) * 64) + offset + (u64::from(n) * 4))
+                    % (u64::from(num_windows) * 64)
+        }
+        match *self {
+            IuCoreReg::G(n) => 0x30_0000 + (u64::from(num_windows) * 64) + (u64::from(n) * 4),
+            IuCoreReg::O(n) => addr(num_windows, cwp, 32, n),
+            IuCoreReg::L(n) => addr(num_windows, cwp, 64, n),
+            IuCoreReg::I(n) => addr(num_windows, cwp, 96, n),
+        }
+    }
+}
+
+impl IuSpecialReg {
+    fn dsu3_addr(&self) -> u64 {
+        match self {
+            IuSpecialReg::Y => 0x40_0000,
+            IuSpecialReg::PSR => 0x40_0004,
+            IuSpecialReg::WIM => 0x40_0008,
+            IuSpecialReg::TBR => 0x40_000C,
+            IuSpecialReg::PC => 0x40_0010,
+            IuSpecialReg::NPC => 0x40_0014,
+            IuSpecialReg::FSR => 0x40_0018,
+            IuSpecialReg::CPSR => 0x40_001C,
+            IuSpecialReg::ASR(n) => 0x40_0040 + u64::from(*n - 16) * 4,
+        }
     }
 }
 
@@ -159,7 +239,7 @@ memory_mapped_bitfield_register! {
     /// processor to enter debug mode. When debug mode is force by setting the BN bit in the DSU control
     /// register, the trap type will be 0xb (hardware watchpoint trap).
     struct DsuDtr(u32);
-    0x400020, "dsu_dtr",
+    0x40_0020, "dsu_dtr",
     impl From;
     /// Error mode (EM) - Set if the trap would have cause the processor to enter error mode.
     em, _: 12;
@@ -174,40 +254,40 @@ memory_mapped_bitfield_register! {
     /// information. It can be modified by the SAVE, RESTORE, Ticc, and RETT
     /// instructions, and by all instructions that modify the condition codes. The
     /// privileged RDPSR and WRPSR instructions read and write the PSR directly.
-    struct Psr(u32);
-    0x400004, "psr",
+    pub struct Psr(u32);
+    0x40_0004, "psr",
     impl From;
     /// Implementation (impl) - Hardwired to identify an implementation or class of implementations
     /// of the architecture. The hardware should not change this field in
     /// response to a WRPSR instruction. Together, the PSR.impl and PSR.ver fields
     /// define a unique implementation or class of implementations of the architecture.
     /// See Appendix L, “Implementation Characteristics.”
-    impl_, _: 31, 28;
+    pub impl_, _: 31, 28;
     /// Version (ver) - Implementation-dependent. The ver field is either
     /// hardwired to identify one or more particular implementations or is a readable and
     /// writable state field whose properties are implementation-dependent.
     /// See Appendix L, “Implementation Characteristics.”
-    ver, _: 27, 24;
+    pub ver, _: 27, 24;
     /// Integer Condition Codes (icc) - The IU’s condition codes. These bits are modified by the
     /// arithmetic and logical instructions whose names end with the letters cc (e.g.,
     /// ANDcc), and by the WRPSR instruction. The Bicc and Ticc instructions cause a
     /// transfer of control based on the value of these bits.
-    icc, _: 23, 20;
+    pub icc, _: 23, 20;
     /// Negative (n) - An ICC bit that indicates whether the 32-bit 2’s complement ALU result was negative for
     /// the last instruction that modified the icc field. 1 = negative, 0 = not negative.
-    n, _: 23;
+    pub n, _: 23;
     /// Zero (z) - An ICC bit that indicates whether the 32-bit ALU result was zero for the last instruction
     /// that modified the icc field. 1 = zero, 0 = nonzero.
-    z, _: 22;
+    pub z, _: 22;
     /// Overflow (v) - An ICC bit that indicates whether the ALU result was within the range of (was represent-
     /// able in) 32-bit 2’s complement notation for the last instruction that modified the
     /// icc field. 1 = overflow, 0 = no overflow.
-    v, _: 21;
+    pub v, _: 21;
     /// Carry (c) - An ICC bit that indicates whether a 2’s complement carry out (or borrow) occurred for the
     /// last instruction that modified the icc field. Carry is set on addition if there is a
     /// carry out of bit 31. Carry is set on subtraction if there is borrow into bit 31. 1 =
     /// carry, 0 = no carry.
-    c, _: 20;
+    pub c, _: 20;
     /// Enable Coprocessor (EC) Determines whether the implementation-dependent coprocessor is enabled.
     /// If disabled, a coprocessor instruction will trap. 1 = enabled, 0 = disabled. If an
     /// implementation does not support a coprocessor in hardware, PSR.EC should
@@ -215,7 +295,7 @@ memory_mapped_bitfield_register! {
     ///
     /// Programming Note Software can use the EF and EC bits to determine whether a particular process uses the FPU or CP.
     /// If a process does not use the FPU/CP, its registers do not need to be saved across a context switch.
-    ec, _: 13;
+    pub ec, _: 13;
     /// Enable Floating-point (EF) - Determines whether the FPU is enabled. If disabled, a floating-point
     /// instruction will trap. 1 = enabled, 0 = disabled. If an implementation does not
     /// support a hardware FPU, PSR.EF should always read as 0 and writes to it should
@@ -223,22 +303,22 @@ memory_mapped_bitfield_register! {
     ///
     /// Programming Note: Software can use the EF and EC bits to determine whether a particular process uses the FPU or CP.
     /// If a process does not use the FPU/CP, its registers do not need to be saved across a context switch.
-    ef, _: 12;
+    pub ef, _: 12;
     /// Processor Interrupt Level (PIL) - Identify the interrupt level above which the processor
     /// will accept an interrupt. See Chapter 7, “Traps.”
-    pil, _: 11, 8;
+    pub pil, _: 11, 8;
     /// Supervisor (S) - Determines whether the processor is in supervisor or user mode. 1 = super-
     /// visor mode, 0 = user mode.
-    s, _: 7;
+    pub s, _: 7;
     /// Previous Supervisor (PS) - The value of the S bit at the time of the most recent trap.
-    ps, _: 6;
+    pub ps, _: 6;
     /// Enable Traps (ET) - Determines whether traps are enabled. A trap automatically resets ET to 0.
     /// When ET=0, an interrupt request is ignored and an exception trap causes the IU
     /// to halt execution, which typically results in a reset trap that resumes execution at
     /// address 0. 1 = traps enabled, 0 = traps disabled. See Chapter 7, “Traps.”
-    et, _: 5;
+    pub et, _: 5;
     /// Current Window Pointer (CWP) - A counter that identifies the current window into the r registers.
     /// The hardware decrements the CWP on traps and SAVE instructions, and increments it on
     /// RESTORE and RETT instructions (modulo NWINDOWS).
-    cwp, _: 4, 0;
+    pub cwp, _: 4, 0;
 }

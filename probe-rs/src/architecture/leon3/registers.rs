@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use crate::{
     CoreRegisters,
+    architecture::leon3::communication_interface::Leon3Error,
     core::{CoreRegister, RegisterDataType, RegisterId, RegisterRole, UnwindRule},
 };
 
@@ -57,7 +58,7 @@ impl From<Leon3RegisterId> for RegisterId {
 }
 
 impl TryFrom<RegisterId> for Leon3RegisterId {
-    type Error = ();
+    type Error = Leon3Error;
 
     fn try_from(value: RegisterId) -> Result<Self, Self::Error> {
         match value.0 >> 12 {
@@ -65,14 +66,14 @@ impl TryFrom<RegisterId> for Leon3RegisterId {
                 // iu core
                 let n = (value.0 & 0xFF) as u8;
                 Ok(Leon3RegisterId::IuCore(if n > 7 {
-                    Err(())?
+                    Err(Leon3Error::InvalidRegisterId(value))?
                 } else {
                     match value.0 >> 8 {
                         0 => IuCoreReg::G(n),
                         1 => IuCoreReg::O(n),
                         2 => IuCoreReg::L(n),
                         3 => IuCoreReg::I(n),
-                        _ => Err(())?,
+                        _ => Err(Leon3Error::InvalidRegisterId(value))?,
                     }
                 }))
             }
@@ -88,7 +89,7 @@ impl TryFrom<RegisterId> for Leon3RegisterId {
                     6 => IuSpecialReg::FSR,
                     7 => IuSpecialReg::CPSR,
                     n @ 32..48 => IuSpecialReg::ASR((n - 16) as u8),
-                    _ => Err(())?,
+                    _ => Err(Leon3Error::InvalidRegisterId(value))?,
                 }))
             }
             2 => {
@@ -96,7 +97,7 @@ impl TryFrom<RegisterId> for Leon3RegisterId {
                 let n = (value.0 & 0xFF) as u8;
                 Ok(Leon3RegisterId::Fpu(FpuReg::F(n)))
             }
-            _ => Err(()),
+            _ => Err(Leon3Error::InvalidRegisterId(value)),
         }
     }
 }
