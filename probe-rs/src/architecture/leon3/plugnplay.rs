@@ -111,7 +111,7 @@ impl AddressSpace {
                 // mask of 0xFFC -> 2 trailing zeros -> 1024 bytes
                 // ...
                 let size = 2u64.pow(mask.trailing_zeros()) * 2u64.pow(8);
-                let start_addr = 0xFFF0_0000 + u64::from(addr & mask) << 8;
+                let start_addr = 0xFFF0_0000 + (u64::from(addr & mask) << 8);
                 start_addr..(start_addr + size)
             }
         };
@@ -138,13 +138,14 @@ impl PlugnPlayState {
                 Ok(record_data)
             })
             .filter_map(|record_data| match record_data {
-                Ok(data) => Record::from_data(&data).map(|r| Ok(r)),
+                Ok(data) => Record::from_data(&data).map(Ok),
                 Err(e) => Some(Err(e)),
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| Leon3Error::PlugnPlayFailure {
                 source: Box::new(err),
             })?;
+        tracing::info!("Plug&Play scan complete: {devices:#?}");
         Ok(Self { devices })
     }
 

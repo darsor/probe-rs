@@ -27,15 +27,20 @@ pub struct AhbJtag {
 
 #[derive(Debug)]
 pub struct AhbJtagState {
-    current_transaction_size: Option<TransactionSize>,
-    current_transaction_kind: Option<TransactionKind>,
+    current_transaction: Option<TransactionState>,
+}
+
+#[derive(Debug)]
+struct TransactionState {
+    size: TransactionSize,
+    kind: TransactionKind,
+    address: u32,
 }
 
 impl AhbJtagState {
     pub fn new() -> Self {
         Self {
-            current_transaction_size: None,
-            current_transaction_kind: None,
+            current_transaction: None,
         }
     }
 }
@@ -107,9 +112,14 @@ impl TransactionData {
     fn encode(&self) -> [u8; 4] {
         let mut result = [0u8; 4];
         match self {
-            TransactionData::U8(data) => result[0] = *data,
-            TransactionData::U16(data) => result[0..2].copy_from_slice(&data.to_be_bytes()),
-            TransactionData::U32(data) => result[0..4].copy_from_slice(&data.to_be_bytes()),
+            TransactionData::U8(data) => {
+                return [*data; 4];
+            }
+            TransactionData::U16(data) => {
+                result[0..2].copy_from_slice(&data.to_le_bytes());
+                result[2..4].copy_from_slice(&data.to_le_bytes());
+            }
+            TransactionData::U32(data) => result[0..4].copy_from_slice(&data.to_le_bytes()),
         }
         result
     }
@@ -166,32 +176,42 @@ impl AhbJtag {
         size: TransactionSize,
     ) -> Result<(), DebugProbeError> {
         let mut cmd = [0u8; 5];
-        cmd[0] = (kind.encode() << 2) | size.encode();
-        cmd[1..].copy_from_slice(&address.to_be_bytes());
+        cmd[0..4].copy_from_slice(&address.to_le_bytes());
+        cmd[4] = (kind.encode() << 2) | size.encode();
         self.probe
             .try_as_jtag_probe()
             .expect("Should be JTAG probe")
             .write_register(self.config.adata_addr, &cmd, ADATA_LEN)?;
-        self.state.current_transaction_kind = Some(kind);
-        self.state.current_transaction_size = Some(size);
+        self.state.current_transaction = Some(TransactionState {
+            size,
+            kind,
+            address,
+        });
+        tracing::debug!("Wrote ADATA: 0x{address:08X} ({kind:?}, {size:?})");
         Ok(())
     }
 
+    // TODO(darsor): batch adata and ddata reads to improve speed
+    // TODO(darsor): subsequent ddata reads don't need to write IR again (write_register does)
     fn read_ddata_with_timeout(
         &mut self,
         seq: Seq,
         timeout: Duration,
     ) -> Result<TransactionData, Leon3Error> {
         if seq == Seq::ContinuingTransaction {
-            assert_eq!(
-                self.state.current_transaction_size,
-                Some(TransactionSize::U32),
-                "Sequential reads can only be performed with U32s"
-            );
+            if let Some(transaction) = &self.state.current_transaction {
+                assert_eq!(
+                    transaction.size,
+                    TransactionSize::U32,
+                    "Sequential reads can only be performed with U32s"
+                );
+            } else {
+                unreachable!("reading DDATA before writing ADATA");
+            }
         }
         let shift_in = match seq {
             Seq::LastTransaction => [0; 5],
-            Seq::ContinuingTransaction => [1, 0, 0, 0, 0],
+            Seq::ContinuingTransaction => [0, 0, 0, 0, 1],
         };
 
         let start_time = Instant::now();
@@ -207,9 +227,9 @@ impl AhbJtag {
             match self.transform_ddata_result(&result) {
                 TransactionOutcome::ReadDone(data) => {
                     if seq == Seq::LastTransaction {
-                        self.state.current_transaction_kind = None;
-                        self.state.current_transaction_size = None;
+                        self.state.current_transaction = None;
                     }
+                    tracing::debug!("Read DDATA: {data:?} ({seq:?})");
                     return Ok(data);
                 }
                 TransactionOutcome::Pending => {
@@ -228,23 +248,27 @@ impl AhbJtag {
         seq: Seq,
         timeout: Duration,
     ) -> Result<(), Leon3Error> {
-        if seq == Seq::ContinuingTransaction {
+        if let Some(transaction) = &self.state.current_transaction {
+            if seq == Seq::ContinuingTransaction {
+                assert_eq!(
+                    transaction.size,
+                    TransactionSize::U32,
+                    "Sequential writes can only be performed with U32s"
+                );
+            }
             assert_eq!(
-                self.state.current_transaction_size,
-                Some(TransactionSize::U32),
-                "Sequential writes can only be performed with U32s"
+                transaction.size,
+                data.size(),
+                "DDATA write size doesn't match ADATA fields"
             );
+        } else {
+            unreachable!("writing DDATA before writing ADATA");
         }
-        assert_eq!(
-            Some(data.size()),
-            self.state.current_transaction_size,
-            "DDATA write size doesn't match ADATA fields"
-        );
         let mut shift_in = match seq {
             Seq::LastTransaction => [0; 5],
-            Seq::ContinuingTransaction => [1, 0, 0, 0, 0],
+            Seq::ContinuingTransaction => [0, 0, 0, 0, 1],
         };
-        shift_in[1..].copy_from_slice(&data.encode());
+        shift_in[..4].copy_from_slice(&data.encode());
 
         let start_time = Instant::now();
         loop {
@@ -260,8 +284,7 @@ impl AhbJtag {
                 TransactionOutcome::WriteDone => {
                     if seq == Seq::LastTransaction {
                         // last transaction
-                        self.state.current_transaction_kind = None;
-                        self.state.current_transaction_size = None;
+                        self.state.current_transaction = None;
                     }
                     return Ok(());
                 }
@@ -276,21 +299,44 @@ impl AhbJtag {
     }
 
     fn transform_ddata_result(&self, response_bits: &BitSlice) -> TransactionOutcome {
+        // TODO(darsor): first write transfer response always returns seq=0, which is not handled,
+        //   so disable that logic for now
+        const CHECK_AHB_FINISHED: bool = false;
         let seq = response_bits
             .get(32)
-            .expect("AHBJTAG DDATA reponses should have at least 33 bits");
-        if !seq {
+            .expect("AHBJTAG DDATA reponses should 33 bits");
+        if CHECK_AHB_FINISHED && !seq {
             // transfer not yet complete
-            TransactionOutcome::Pending
-        } else if self.state.current_transaction_kind == Some(TransactionKind::Write) {
-            TransactionOutcome::WriteDone
-        } else {
-            TransactionOutcome::ReadDone(match self.state.current_transaction_size {
-                Some(TransactionSize::U32) => TransactionData::U32(response_bits[0..32].load_be()),
-                Some(TransactionSize::U16) => TransactionData::U16(response_bits[16..32].load_be()),
-                Some(TransactionSize::U8) => TransactionData::U8(response_bits[24..32].load_be()),
-                None => panic!("Must write ADATA before reading DDATA"),
-            })
+            return TransactionOutcome::Pending;
+        }
+
+        let Some(transaction) = &self.state.current_transaction else {
+            unreachable!("DDATA accessed before writing ADATA");
+        };
+
+        match transaction.kind {
+            TransactionKind::Read => TransactionOutcome::ReadDone(match transaction.size {
+                TransactionSize::U32 => TransactionData::U32(response_bits[0..32].load_le()),
+                TransactionSize::U16 => {
+                    let bit_range = match transaction.address % 4 {
+                        0 => 16..32,
+                        2 => 0..16,
+                        _ => unreachable!("Address should be U16 aligned"),
+                    };
+                    TransactionData::U16(response_bits[bit_range].load_le())
+                }
+                TransactionSize::U8 => {
+                    let bit_range = match transaction.address % 4 {
+                        0 => 24..32,
+                        1 => 16..24,
+                        2 => 8..16,
+                        3 => 0..8,
+                        _ => unreachable!(),
+                    };
+                    TransactionData::U8(response_bits[bit_range].load_le())
+                }
+            }),
+            TransactionKind::Write => TransactionOutcome::WriteDone,
         }
     }
 
