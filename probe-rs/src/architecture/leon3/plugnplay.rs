@@ -2,11 +2,23 @@ use std::{fmt::Display, ops::Range};
 
 use crate::{MemoryInterface, architecture::leon3::communication_interface::Leon3Error};
 
-const PNP_BASE_ADDRESS: u32 = 0xFFFF_F000;
-// bytes for each AHB record
-const PNP_RECORD_SIZE: u32 = 32;
-// 64 masters and 63 slaves
-const PNP_NUM_RECORDS: u32 = 64 + 63;
+const PNP_AHB_MASTER_ADDRESS: u64 = 0xFFFF_F000;
+const PNP_AHB_SLAVE_ADDRESS: u64 = 0xFFFF_F800;
+/// Number of bytes for each AHB record
+const PNP_AHB_RECORD_SIZE: u64 = 32;
+/// The PNP region supports up to 64 masters, but the GRLIB AHB bus
+/// controller only supports up to 16.
+const PNP_NUM_AHB_MASTER_RECORDS: u64 = 16;
+/// The PNP region supports up to 63 slaves, but the GRLIB AHB bus
+/// controller only supports up to 16.
+const PNP_NUM_AHB_SLAVE_RECORDS: u64 = 16;
+
+const PNP_APB_OFFSET: u64 = 0x000F_F000;
+/// Number of bytes for each APB record
+const PNP_APB_RECORD_SIZE: u64 = 8;
+/// The APB PNP region supports up to 512 slaves, but the GRLIB APB
+/// bus controllers only supports up to 16.
+const PNP_NUM_APB_RECORDS: u64 = 16;
 
 #[derive(Debug)]
 pub struct PlugnPlayState {
@@ -15,10 +27,18 @@ pub struct PlugnPlayState {
 
 #[derive(Debug, Clone)]
 pub struct Record {
+    pub kind: RecordKind,
     pub device: Device,
     pub version: u8,
     pub irq: u8,
     pub address_spaces: Vec<AddressSpace>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RecordKind {
+    AhbMaster,
+    AhbSlave,
+    ApbSlave,
 }
 
 #[derive(Debug, Clone)]
@@ -48,27 +68,48 @@ impl AddressSpaceKind {
 }
 
 impl Record {
-    fn from_data(data: &[u32; 8]) -> Option<Self> {
-        let vendor_id = u8::try_from((data[0] & 0xFF00_0000) >> 24).unwrap();
-        let device_id = u16::try_from((data[0] & 0x00FF_F000) >> 12).unwrap();
+    fn from_identification(data: u32, kind: RecordKind) -> Option<Self> {
+        let vendor_id = u8::try_from((data & 0xFF00_0000) >> 24).unwrap();
+        let device_id = u16::try_from((data & 0x00FF_F000) >> 12).unwrap();
         let device = Device::from_ids(vendor_id, device_id);
         if device == Device::Reserved {
             // Vendor ID 0x00 is reserved to indicate that no core is present
             return None;
         }
-        let version = u8::try_from((data[0] & 0x0000_03E0) >> 5).unwrap();
-        let irq = u8::try_from(((data[0] & 0x0000_0C00) >> 5) | (data[0] & 0x0000_001F)).unwrap();
-        let address_space = data[4..]
-            .iter()
-            .filter_map(|bar| AddressSpace::from_bar(*bar))
-            .collect();
+        let version = u8::try_from((data & 0x0000_03E0) >> 5).unwrap();
+        let irq = u8::try_from(((data & 0x0000_0C00) >> 5) | (data & 0x0000_001F)).unwrap();
 
         Some(Self {
+            kind,
             device,
             version,
             irq,
-            address_spaces: address_space,
+            address_spaces: vec![],
         })
+    }
+
+    fn from_ahb_data(data: &[u32; 8], kind: RecordKind) -> Option<Self> {
+        let mut this = Self::from_identification(data[0], kind)?;
+        this.address_spaces.extend(
+            data[4..]
+                .iter()
+                .filter_map(|bar| AddressSpace::from_bar(*bar)),
+        );
+        Some(this)
+    }
+
+    fn from_apb_data(apb_base_addr: u64, data: &[u32; 2]) -> Option<Self> {
+        let mut this = Self::from_identification(data[0], RecordKind::ApbSlave)?;
+        this.address_spaces
+            .extend(data[1..].iter().filter_map(|bar| {
+                AddressSpace::from_bar(*bar).map(|mut addr_space| {
+                    // offset by the APB bus's base address
+                    addr_space.addresses = (addr_space.addresses.start + apb_base_addr)
+                        ..(addr_space.addresses.end + apb_base_addr);
+                    addr_space
+                })
+            }));
+        Some(this)
     }
 }
 
@@ -125,26 +166,96 @@ impl AddressSpace {
 }
 
 impl PlugnPlayState {
-    // TODO(darsor) return Plugnplay specific error
-    pub(crate) fn scan_plugnplay(mem: &mut dyn MemoryInterface) -> Result<Self, crate::Error> {
-        let devices = (0..PNP_NUM_RECORDS)
-            .map(|record_idx| PNP_BASE_ADDRESS + record_idx * PNP_RECORD_SIZE)
+    fn scan_ahb(
+        mem: &mut dyn MemoryInterface,
+        base_addr: u64,
+        num_records: u64,
+        kind: RecordKind,
+    ) -> Result<Vec<Record>, crate::Error> {
+        Ok((0..num_records)
+            .map(move |record_idx| base_addr + record_idx * PNP_AHB_RECORD_SIZE)
             .map(|record_address| -> Result<_, crate::Error> {
                 let mut record_data = [0u32; 8];
+                mem.read_32(record_address, &mut record_data)
+                    .map_err(|err| Leon3Error::PlugnPlayFailure {
+                        source: Box::new(err),
+                    })?;
+                Ok(record_data)
+            })
+            .filter_map(move |record_data| match record_data {
+                Ok(data) => Record::from_ahb_data(&data, kind).map(Ok),
+                Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
+                    source: Box::new(e),
+                }))),
+            })
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn scan_apb(
+        mem: &mut dyn MemoryInterface,
+        apb_base_addr: u64,
+        num_records: u64,
+    ) -> Result<Vec<Record>, crate::Error> {
+        Ok((0..num_records)
+            .map(move |record_idx| {
+                apb_base_addr + PNP_APB_OFFSET + record_idx * PNP_AHB_RECORD_SIZE
+            })
+            .map(|record_address| -> Result<_, crate::Error> {
+                let mut record_data = [0u32; 2];
                 mem.read_32(u64::from(record_address), &mut record_data)
                     .map_err(|err| Leon3Error::PlugnPlayFailure {
                         source: Box::new(err),
                     })?;
                 Ok(record_data)
             })
-            .filter_map(|record_data| match record_data {
-                Ok(data) => Record::from_data(&data).map(Ok),
-                Err(e) => Some(Err(e)),
+            .filter_map(move |record_data| match record_data {
+                Ok(data) => Record::from_apb_data(u64::from(apb_base_addr), &data).map(Ok),
+                Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
+                    source: Box::new(e),
+                }))),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| Leon3Error::PlugnPlayFailure {
-                source: Box::new(err),
-            })?;
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn scan_plugnplay(mem: &mut dyn MemoryInterface) -> Result<Self, crate::Error> {
+        let masters = Self::scan_ahb(
+            mem,
+            PNP_AHB_MASTER_ADDRESS,
+            PNP_NUM_AHB_MASTER_RECORDS,
+            RecordKind::AhbMaster,
+        )?;
+        let slaves = Self::scan_ahb(
+            mem,
+            PNP_AHB_SLAVE_ADDRESS,
+            PNP_NUM_AHB_SLAVE_RECORDS,
+            RecordKind::AhbSlave,
+        )?;
+        let apb_slaves = slaves
+            .iter()
+            .filter_map(|slave| {
+                if matches!(
+                    slave.device,
+                    Device::Gaisler(GaislerDevice::APBMST)
+                        | Device::Gaisler(GaislerDevice::APB3MST)
+                ) {
+                    let apb_base_addr = slave
+                        .address_spaces
+                        .get(0)
+                        .expect("APB Bus should have a P&P AHB address space")
+                        .addresses
+                        .start;
+                    Some(Self::scan_apb(mem, apb_base_addr, PNP_NUM_APB_RECORDS))
+                } else {
+                    None
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut devices = masters;
+        devices.extend(slaves);
+        for apb in apb_slaves {
+            devices.extend(apb);
+        }
+
         tracing::info!("Plug&Play scan complete: {devices:#?}");
         Ok(Self { devices })
     }
