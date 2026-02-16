@@ -4,6 +4,7 @@ use crate::{
         communication_interface::Leon3Error,
         registers::{IuCoreReg, IuSpecialReg},
     },
+    memory::valid_32bit_address,
     memory_mapped_bitfield_register,
 };
 
@@ -14,6 +15,8 @@ pub(crate) struct Dsu3<'state> {
 }
 
 impl<'state> Dsu3<'state> {
+    // TODO(darsor): may not always be 8, read from ASR17
+    const NUM_WINDOWS: u32 = 8;
     pub fn new(state: &'state mut Dsu3State) -> Self {
         Self { state }
     }
@@ -77,9 +80,7 @@ impl<'state> Dsu3<'state> {
         core_index: usize,
         cwp: u32,
     ) -> Result<u32, crate::Error> {
-        // TODO(darsor): may not always be 8, read from ASR17
-        let num_windows = 8;
-        let addr = self.base_address(core_index)? + reg.dsu3_addr(num_windows, cwp);
+        let addr = self.base_address(core_index)? + reg.dsu3_addr(Self::NUM_WINDOWS, cwp);
         ahb.read_word_32(addr)
     }
 
@@ -91,9 +92,7 @@ impl<'state> Dsu3<'state> {
         core_index: usize,
         cwp: u32,
     ) -> Result<(), crate::Error> {
-        // TODO(darsor): may not always be 8, read from ASR17
-        let num_windows = 8;
-        let addr = self.base_address(core_index)? + reg.dsu3_addr(num_windows, cwp);
+        let addr = self.base_address(core_index)? + reg.dsu3_addr(Self::NUM_WINDOWS, cwp);
         ahb.write_word_32(addr, value)
     }
 
@@ -116,6 +115,71 @@ impl<'state> Dsu3<'state> {
     ) -> Result<(), crate::Error> {
         let addr = self.base_address(core_index)? + reg.dsu3_addr();
         ahb.write_word_32(addr, value)
+    }
+
+    /// Set all core IU registers (Gx, Ix, Lx, Ox) to 0.
+    pub(crate) fn clear_all_core_reg(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+    ) -> Result<(), crate::Error> {
+        // clear g1-g7
+        for i in 1..=7 {
+            self.write_core_reg(IuCoreReg::G(i), 0, ahb, core_index, 0)?;
+        }
+        // clear lx, ix, ox
+        let base_address = self.base_address(core_index)?;
+        let num_registers = u64::from(Self::NUM_WINDOWS) * 16;
+        for i in 0..num_registers {
+            ahb.write_word_32(base_address + 0x30_0000 + 4 * i, 0u32)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_hw_breakpoint(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+        unit_index: usize,
+        addr: u64,
+        enable: bool,
+    ) -> Result<(), crate::Error> {
+        if unit_index > 4 {
+            return Err(Leon3Error::BreakpointOutOfRange(unit_index))?;
+        }
+        let addr = valid_32bit_address(addr)?;
+        {
+            let reg_addr = self.dsu_reg_address::<Asr24>(core_index)?;
+            let mut bp_addr = Asr24::from(0);
+            bp_addr.set_waddr(addr >> 2);
+            bp_addr.set_ifetch(enable);
+            ahb.write_word_32(reg_addr + 8 * (unit_index as u64), bp_addr.into())?;
+        }
+        {
+            let reg_addr = self.dsu_reg_address::<Asr25>(core_index)?;
+            let mut bp_mask = Asr25::from(0);
+            bp_mask.set_wmask(0xFFFF_FFFF);
+            bp_mask.set_dl(false);
+            bp_mask.set_ds(false);
+            ahb.write_word_32(reg_addr + 8 * (unit_index as u64), bp_mask.into())
+        }
+    }
+
+    pub(crate) fn get_hw_breakpoint(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+        unit_index: usize,
+    ) -> Result<Option<u64>, crate::Error> {
+        if unit_index > 4 {
+            return Err(Leon3Error::BreakpointOutOfRange(unit_index))?;
+        }
+        let reg_addr = self.dsu_reg_address::<Asr24>(core_index)?;
+        let value = ahb.read_word_32(reg_addr + 8 * (unit_index as u64))?;
+        let asr24 = Asr24::from(value);
+        let enabled = asr24.ifetch();
+        let addr = u64::from(asr24.waddr() << 2);
+        Ok(enabled.then_some(addr))
     }
 }
 
@@ -177,6 +241,9 @@ impl DsuRegister for DsuBrss {
 impl DsuRegister for DsuDbgm {}
 impl DsuRegister for DsuDtr {}
 impl DsuRegister for Psr {}
+impl DsuRegister for Asr17 {}
+impl DsuRegister for Asr24 {}
+impl DsuRegister for Asr25 {}
 
 memory_mapped_bitfield_register! {
     /// DSU Control Register (GRLIB IP Core User's Manual 32.6.1)
@@ -262,13 +329,13 @@ memory_mapped_bitfield_register! {
     /// The DSU trap register is a read-only register that indicates which SPARC trap type that caused the
     /// processor to enter debug mode. When debug mode is force by setting the BN bit in the DSU control
     /// register, the trap type will be 0xb (hardware watchpoint trap).
-    struct DsuDtr(u32);
+    pub struct DsuDtr(u32);
     0x40_0020, "dsu_dtr",
     impl From;
     /// Error mode (EM) - Set if the trap would have cause the processor to enter error mode.
-    em, _: 12;
+    pub em, _: 12;
     /// Trap type (TRAPTYPE) - 8-bit SPARC trap type
-    u8, traptype, _: 11, 4;
+    pub u8, traptype, _: 11, 4;
 }
 
 memory_mapped_bitfield_register! {
@@ -333,16 +400,114 @@ memory_mapped_bitfield_register! {
     pub pil, _: 11, 8;
     /// Supervisor (S) - Determines whether the processor is in supervisor or user mode. 1 = super-
     /// visor mode, 0 = user mode.
-    pub s, _: 7;
+    pub s, set_s: 7;
     /// Previous Supervisor (PS) - The value of the S bit at the time of the most recent trap.
-    pub ps, _: 6;
+    pub ps, set_ps: 6;
     /// Enable Traps (ET) - Determines whether traps are enabled. A trap automatically resets ET to 0.
     /// When ET=0, an interrupt request is ignored and an exception trap causes the IU
     /// to halt execution, which typically results in a reset trap that resumes execution at
     /// address 0. 1 = traps enabled, 0 = traps disabled. See Chapter 7, “Traps.”
-    pub et, _: 5;
+    pub et, set_et: 5;
     /// Current Window Pointer (CWP) - A counter that identifies the current window into the r registers.
     /// The hardware decrements the CWP on traps and SAVE instructions, and increments it on
     /// RESTORE and RETT instructions (modulo NWINDOWS).
     pub cwp, _: 4, 0;
+}
+
+impl Default for Psr {
+    // reset value
+    fn default() -> Self {
+        let mut this = Self::from(0);
+        this.set_et(true);
+        this.set_ps(true);
+        this.set_s(true);
+        this
+    }
+}
+
+memory_mapped_bitfield_register! {
+    /// ASR17 - LEON3 Configuration Register (GRLIB IP Core User's Manual, LEON3/FT)
+    ///
+    /// The ancillary state register 17 (%asr17) provides information on how various configuration options
+    /// were set during synthesis. This can be used to enhance the performance of software, or to support enu-
+    /// meration in multi-processor systems. There are also a few bits that are writable to configure certain
+    /// aspects of the processor.
+    pub struct Asr17(u32);
+    0x40_0044, "asr17",
+    impl From;
+    /// Processor index (INDEX) - In multi-processor systems, each LEON core gets a unique index to
+    /// support enumeration. The value in this field is identical to the hindex VHDL generic parameter in
+    /// the VHDL model.
+    pub index, _: 31, 28;
+    /// Disable Branch Prediction (DBP) - Disables branch prediction when set to ‘1’. Field is only avail-
+    /// able if the VHDL generic bp is set to the value 2.
+    pub dbp, set_dbp: 27;
+    /// Tagged arithmetic (NOTAG) - If this read-only field is ‘1’ then the processor supports tagged arith-
+    /// metic and the compare-and-swap (CASA) instruction. The current version if the LEON3 always
+    /// supports tagged arithmetic and CASA.
+    pub notag, _: 26;
+    /// Disable Branch Prediction on instruction cache misses (DBPM) - When set to ‘1’ this avoids
+    /// instruction cache fetches (and possible MMU table walk) for predicted instructions that may be
+    /// annulled. This feature is on by default (reset value ‘1’), if branch prediction is programmable then
+    /// this is also programmable.
+    pub dbpm, set_dpbm: 25;
+    /// REX version (REXV) - read-only field that is set to ‘00’ if REX is not implemented, ‘01’ if REX is
+    /// implemented, ‘10’ and ‘11’ values are reserved for future implementations
+    pub rexv, _: 24, 23;
+    /// REX mode (REXM) - set to ‘00’ for REX enabled, ‘01’ for REX illegal and ‘10’ for REX
+    /// transparent mode. Writable with reset value ‘01’ when REX support has been enabled
+    pub rexm, set_rexm: 22, 21;
+    /// Clock switching enabled (CS). If set, switching between AHB and CPU frequency is available.
+    pub cs, _: 17;
+    /// CPU clock frequency (CF). CPU core runs at (CF+1) times AHB frequency.
+    pub cf, _: 16, 15;
+    /// Disable write error trap (DWT). When set, a write error trap (tt = 0x2b) will be ignored. Set to zero
+    /// after reset.
+    pub dwt, set_dwt: 14;
+    /// Single-vector trapping (SVT) enable. If set, will enable single-vector trapping. Fixed to zero if SVT
+    /// is not implemented. Set to zero after reset.
+    pub svt, set_stv: 13;
+    /// Load delay (LDDEL) - If set, the pipeline uses a 2-cycle load delay. Otherwise, a 1-cycle load
+    /// delay i s used. Generated from the lddel VHDL generic parameter in the VHDL model.
+    pub lddel, _: 12;
+    /// FPU option. “00” = no FPU; “01” = GRFPU; “10” = Meiko FPU, “11” = GRFPU-Lite
+    pub fpu, _: 11, 10;
+    /// If set, the optional multiply-accumulate (MAC) instruction is available
+    pub mac, _: 9;
+    /// If set, the SPARC V8 multiply and divide instructions are available
+    pub v8, _: 8;
+    /// Number of implemented watchpoints (NWP) (0 - 4)
+    pub nwp, _: 7, 5;
+    /// Number of implemented registers windows corresponds to NWIN+1.
+    pub nwin, _: 4, 0;
+}
+
+memory_mapped_bitfield_register! {
+    /// ASR24 - Hardware Watchpoint/Breakpoint Address Register (GRLIB IP Core User's Manual, LEON3/FT)
+    ///
+    /// Each breakpoint consists of a pair of ancillary state registers (%asr24/25, %asr26/27, %asr28/29 and
+    /// %asr30/31) registers; one with the break address and one with a mask.
+    struct Asr24(u32);
+    0x40_0060, "asr24",
+    impl From;
+    /// WADDR - Address to compare against
+    waddr, set_waddr: 31, 2;
+    /// IF - If set, break on instruction fetch from the specified address/mask combination
+    ifetch, set_ifetch: 0;
+}
+
+memory_mapped_bitfield_register! {
+    /// ASR25 - Hardware Watchpoint/Breakpoint Mask Register (GRLIB IP Core User's Manual, LEON3/FT)
+    ///
+    /// Each breakpoint consists of a pair of ancillary state registers (%asr24/25, %asr26/27, %asr28/29 and
+    /// %asr30/31) registers; one with the break address and one with a mask.
+    struct Asr25(u32);
+    0x40_0064, "asr25",
+    impl From;
+    /// WMASK - Bit mask controlling which bits to check (1) or ignore (0) for match
+    wmask, set_wmask: 31, 2;
+    /// DL - If set, break on data load from the specified address/mask combination
+    dl, set_dl: 1;
+    /// DS - If set, break on data store to the specified address/mask combination
+    ds, set_ds: 0;
 }

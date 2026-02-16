@@ -4,17 +4,19 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    CoreInterface, CoreStatus, HaltReason, RegisterId, RegisterValue,
+    BreakpointCause, CoreInformation, CoreInterface, CoreStatus, HaltReason, MemoryInterface,
+    RegisterId, RegisterValue,
     architecture::leon3::{
-        communication_interface::Leon3CommunicationInterface,
-        dsu3::{DsuBrss, DsuCtrl},
-        registers::Leon3RegisterId,
+        communication_interface::{Leon3CommunicationInterface, Leon3Error},
+        dsu3::{Asr17, DsuBrss, DsuCtrl, DsuDtr, Psr},
+        registers::{IuCoreReg, IuSpecialReg, Leon3RegisterId},
         sequences::Leon3DebugSequence,
     },
     memory::CoreMemoryInterface,
 };
 
 pub mod ahbjtag;
+pub mod assembly;
 pub mod communication_interface;
 mod dsu3;
 mod plugnplay;
@@ -80,34 +82,48 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn status(&mut self) -> Result<CoreStatus, crate::Error> {
-        // TODO(darsor): check on hardware if BN is always set when debug mode is entered
+        // TODO(darsor): check on hardware if BN is always set when debug mode is active
         let ctrl: DsuCtrl = self.interface.read_dsu_reg()?;
-        if ctrl.pw() {
-            return Ok(CoreStatus::Sleeping);
-        }
         if self.core_halted()? {
-            // TODO(darsor): ensure debug mode
+            if ctrl.eb() {
+                return Ok(CoreStatus::Halted(HaltReason::External));
+            }
             let brss: DsuBrss = self.interface.read_dsu_reg()?;
+            // check for error mode
             if ctrl.pe() {
                 return Ok(CoreStatus::Halted(HaltReason::Exception));
             }
+            // check for single-step
             if brss.ss(self.core_index) {
-                // TODO(darsor): when to clear this bit?
                 return Ok(CoreStatus::Halted(HaltReason::Step));
-            } else {
-                Ok(CoreStatus::Halted(HaltReason::Unknown))
             }
-            // TODO(darsor): check PC and see if executed bp instruction?
-            // let pc = self.read_core_reg(registers::PC.id())?;
-
-            // TODO(darsor): check LEON3 registers for hardware watchpoint?
-
-            // TODO(darsor): check PC and see if executed bp instruction?
-
-            // TODO(darsor): otherwise if BN is set then it was probably a request
-            // else {
-            //     return Ok(CoreStatus::Halted(HaltReason::Request));
-            // }
+            // check for SW breakpoint
+            let dtr: DsuDtr = self.interface.read_dsu_reg()?;
+            match dtr.traptype() {
+                0x81 => {
+                    // SW trap 1, typically used as SW breakpoint
+                    return Ok(CoreStatus::Halted(HaltReason::Breakpoint(
+                        BreakpointCause::Software,
+                    )));
+                }
+                0xB => {
+                    // Hardware watchpoint trap
+                    let CoreInformation { pc } = self.interface.core_info()?;
+                    if self
+                        .hw_breakpoints()?
+                        .iter()
+                        .any(|bp| bp.is_some_and(|addr| addr == pc))
+                    {
+                        return Ok(CoreStatus::Halted(HaltReason::Breakpoint(
+                            BreakpointCause::Hardware,
+                        )));
+                    }
+                    return Ok(CoreStatus::Halted(HaltReason::Request));
+                }
+                _ => return Ok(CoreStatus::Halted(HaltReason::Unknown)),
+            }
+        } else if ctrl.pw() {
+            return Ok(CoreStatus::Sleeping);
         } else {
             return Ok(CoreStatus::Running);
         }
@@ -122,34 +138,76 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn run(&mut self) -> Result<(), crate::Error> {
-        // TODO(darsor): return error if in halted/error state, only run if in debug mode
-        // TODO(darsor): clear BN bit
-        todo!()
+        let dsu_ctrl: DsuCtrl = self.interface.read_dsu_reg()?;
+        // TODO(darsor): better error types
+        if dsu_ctrl.pe() || dsu_ctrl.hl() {
+            return Err(Leon3Error::Other("core is in error mode"))?;
+        }
+        if !dsu_ctrl.dm() {
+            return Err(Leon3Error::Other("core is not in debug mode"))?;
+        }
+        // TODO(darsor): always do a single step first?
+        let mut brss = DsuBrss::from(0x0000_FFFF);
+        brss.set_bn(self.core_index, false);
+        self.interface.write_dsu_reg(brss)
     }
 
     fn reset(&mut self) -> Result<(), crate::Error> {
-        // Register Reset values
-        // Trap Base Register       Trap Base Address field reset (value given by rstaddr VHDL generic)
-        // PC                       0x0 (rstaddr VHDL generic)
-        // nPC                      0x4 (rstaddr VHDL genericc + 4)
-        // PSR                      ET=0, S=1
-        // By default, the execution will start from address 0. This can be overridden by setting the rstaddr
-        // VHDL generic in the model to a non-zero value. The reset address is always aligned on a 4 KiB
-        // boundary. If rstaddr is set to 16#FFFFF#, then the reset address is taken from the signal IRQI.RST-
-        // VEC. This allows the reset address to be changed dynamically
-        // TODO(darsor): clear caches
-        todo!()
+        self.reset_and_halt(Duration::default())?;
+        self.run()
     }
 
     fn reset_and_halt(
         &mut self,
-        timeout: Duration,
+        _timeout: Duration,
     ) -> Result<crate::CoreInformation, crate::Error> {
-        todo!()
+        if !self.interface.core_in_debug_mode()? {
+            return Err(Leon3Error::Other("Core must be in debug mode to reset"))?;
+        }
+        // TODO IRQMP: disable and clear all interrupts
+        // clear error/halt mode
+        self.interface.modify_dsu_reg(|r: &mut DsuCtrl| {
+            r.set_pe(true);
+        })?;
+        // disable hardware watchpoints
+        let nwp = self.available_breakpoint_units()?;
+        for wp in 0..nwp {
+            self.clear_hw_breakpoint(wp as usize)?;
+        }
+        // set all core registers to 0
+        self.interface.clear_all_core_reg()?;
+        // reset special registers
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::Y), 0)?;
+        self.interface.write_dsu_reg(Psr::default())?;
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::WIM), 2)?;
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::TBR), 0)?;
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::PC), 0)?;
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::NPC), 4)?;
+        self.interface
+            .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::FSR), 0)?;
+        // TODO DSU: flush caches
+        self.interface.core_info()
     }
 
     fn step(&mut self) -> Result<crate::CoreInformation, crate::Error> {
-        todo!()
+        // single step only this core
+        let mut brss = DsuBrss::from(0x0000_FFFF);
+        brss.set_bn(self.core_index, false);
+        brss.set_ss(self.core_index, true);
+        self.interface.write_dsu_reg(brss)?;
+        // ensure in debug mode after step
+        let new_brss: DsuBrss = self.interface.read_dsu_reg()?;
+        if !new_brss.bn(self.core_index) {
+            return Err(crate::Error::Other(
+                "core not halted after single step".to_string(),
+            ));
+        }
+        self.interface.core_info()
     }
 
     fn read_core_reg(&mut self, address: RegisterId) -> Result<RegisterValue, crate::Error> {
@@ -170,23 +228,32 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn available_breakpoint_units(&mut self) -> Result<u32, crate::Error> {
-        todo!()
+        let asr17: Asr17 = self.interface.read_dsu_reg()?;
+        Ok(asr17.nwp())
     }
 
     fn hw_breakpoints(&mut self) -> Result<Vec<Option<u64>>, crate::Error> {
-        todo!()
+        let nwp = self.available_breakpoint_units()?;
+        (0..nwp)
+            .map(|wp| self.interface.get_hw_breakpoint(wp as usize))
+            .collect()
     }
 
     fn enable_breakpoints(&mut self, state: bool) -> Result<(), crate::Error> {
-        todo!()
+        self.interface.modify_dsu_reg(|r: &mut DsuCtrl| {
+            r.set_bs(state);
+            // Always break on hardware watchpoints since this is also what
+            // enables us to set the BN bit to force debug mode.
+            r.set_bw(true);
+        })
     }
 
     fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), crate::Error> {
-        todo!()
+        self.interface.set_hw_breakpoint(unit_index, addr, true)
     }
 
     fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), crate::Error> {
-        todo!()
+        self.interface.set_hw_breakpoint(unit_index, 0, false)
     }
 
     fn registers(&self) -> &'static crate::CoreRegisters {
@@ -210,7 +277,10 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn hw_breakpoints_enabled(&self) -> bool {
-        todo!()
+        // The only way to disable HW breakpoints is to set the DsuCtrl
+        // BW bit to 0, which blocks us from forcing debug mode. So
+        // always leave them enabled.
+        true
     }
 
     fn architecture(&self) -> probe_rs_target::Architecture {
@@ -226,11 +296,13 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn fpu_support(&mut self) -> Result<bool, crate::Error> {
-        todo!()
+        // TODO(darsor): implement this
+        Ok(false)
     }
 
     fn floating_point_register_count(&mut self) -> Result<usize, crate::Error> {
-        todo!()
+        // TODO(darsor): implement this
+        Ok(0)
     }
 
     fn reset_catch_set(&mut self) -> Result<(), crate::Error> {
@@ -242,12 +314,6 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn debug_core_stop(&mut self) -> Result<(), crate::Error> {
-        todo!()
-    }
-
-    fn spill_registers(&mut self) -> Result<(), crate::Error> {
-        // For most architectures, this is not necessary. Use cases include processors
-        // that have a windowed register file, where the whole register file is not visible at once.
         todo!()
     }
 }

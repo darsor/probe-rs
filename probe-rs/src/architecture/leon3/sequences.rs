@@ -2,7 +2,11 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     Session,
-    architecture::leon3::communication_interface::{Leon3CommunicationInterface, Leon3Error},
+    architecture::leon3::{
+        communication_interface::{Leon3CommunicationInterface, Leon3Error},
+        registers::{Leon3RegisterId, NPC, PC, SP, TBR},
+    },
+    memory::valid_32bit_address,
 };
 
 /// A interface to operate debug sequences for Leon3 targets.
@@ -48,8 +52,6 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
         session: &mut Session,
     ) -> Result<(), crate::Error> {
         tracing::info!("Performing RAM flash start");
-        const SP_MAIN_OFFSET: usize = 0;
-        const RESET_VECTOR_OFFSET: usize = 1;
 
         if session.list_cores().len() > 1 {
             return Err(crate::Error::NotImplemented(
@@ -57,9 +59,28 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
             ));
         }
 
+        // FIXME: currently defaulting stack pointer to end of RAM region
+        // we're flashing into. Is there a better heuristic? Or at least
+        // make configurable.
+        let Some(ram_region) = session
+            .target()
+            .memory_map
+            .iter()
+            .find(|&region| region.is_ram() && region.contains(vector_table_addr))
+        else {
+            return Err(crate::Error::Other(
+                "RAM flash region not included in target definition".to_string(),
+            ));
+        };
+        let stack_pointer = ram_region.address_range().end - 4;
+        let stack_pointer = valid_32bit_address(stack_pointer)?;
+
         tracing::debug!("RAM flash start for LEON3 single core target");
-        // TODO(darsor): set stack pointer and PC? And TBR?
-        todo!()
+        let mut core = session.core(0)?;
+        core.write_core_reg(PC.id, vector_table_addr as u32)?;
+        core.write_core_reg(NPC.id, vector_table_addr as u32 + 4)?;
+        core.write_core_reg(TBR.id, vector_table_addr as u32)?;
+        core.write_core_reg(SP.id, stack_pointer)
     }
 }
 

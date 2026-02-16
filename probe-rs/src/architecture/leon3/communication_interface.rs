@@ -40,6 +40,12 @@ pub enum Leon3Error {
     /// Reset halt request not supported by this chip.
     #[error("Reset halt request not supported")]
     ResetHaltRequestNotSupported,
+    /// Breakpoint operation requested on invalid breakpoint
+    #[error("Breakpoint {0} out of range (must be 0-4)")]
+    BreakpointOutOfRange(usize),
+    /// Some uncategorized LEON3 error occurred.
+    #[error("{0}")]
+    Other(&'static str),
 }
 
 impl From<Leon3Error> for ProbeRsError {
@@ -161,6 +167,28 @@ impl<'state> Leon3CommunicationInterface<'state> {
             }
             Leon3RegisterId::Fpu(_fpu_reg) => todo!(),
         }
+    }
+
+    pub(crate) fn clear_all_core_reg(&mut self) -> Result<(), crate::Error> {
+        self.dsu.clear_all_core_reg(self.probe, self.core_index)
+    }
+
+    pub(crate) fn set_hw_breakpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        enable: bool,
+    ) -> Result<(), crate::Error> {
+        self.dsu
+            .set_hw_breakpoint(self.probe, self.core_index, unit_index, addr, enable)
+    }
+
+    pub(crate) fn get_hw_breakpoint(
+        &mut self,
+        unit_index: usize,
+    ) -> Result<Option<u64>, crate::Error> {
+        self.dsu
+            .get_hw_breakpoint(self.probe, self.core_index, unit_index)
     }
 
     pub(crate) fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {

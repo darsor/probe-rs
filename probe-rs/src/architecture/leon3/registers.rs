@@ -136,6 +136,22 @@ pub const PC: CoreRegister = CoreRegister {
     unwind_rule: UnwindRule::Clear,
 };
 
+/// The next program counter register.
+pub const NPC: CoreRegister = CoreRegister {
+    roles: &[RegisterRole::Core("npc"), RegisterRole::ProgramCounter],
+    id: RegisterId(Leon3RegisterId::IuSpecial(IuSpecialReg::NPC).to_u16()),
+    data_type: RegisterDataType::UnsignedInteger(32),
+    unwind_rule: UnwindRule::Clear,
+};
+
+/// The trap base pointer register
+pub const TBR: CoreRegister = CoreRegister {
+    roles: &[RegisterRole::Core("tbr")],
+    id: RegisterId(Leon3RegisterId::IuSpecial(IuSpecialReg::TBR).to_u16()),
+    data_type: RegisterDataType::UnsignedInteger(32),
+    unwind_rule: UnwindRule::Clear,
+};
+
 /// The stack pointer register.
 pub const SP: CoreRegister = CoreRegister {
     roles: &[

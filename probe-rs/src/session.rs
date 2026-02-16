@@ -851,8 +851,11 @@ impl Session {
             crate::config::DebugSequence::Arm(arm) => {
                 arm.prepare_running_on_ram(vector_table_addr, self)
             }
+            crate::config::DebugSequence::Leon3(leon3) => {
+                leon3.prepare_running_on_ram(vector_table_addr, self)
+            }
             _ => Err(crate::Error::NotImplemented(
-                "ram flash non-ARM architectures",
+                "ram flash non-ARM/LEON3 architectures",
             )),
         }
     }
