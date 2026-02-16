@@ -6,6 +6,7 @@ use crate::{
     Session,
     architecture::leon3::{
         communication_interface::{Leon3CommunicationInterface, Leon3Error},
+        plugnplay::Record,
         registers::{NPC, PC, SP, TBR},
     },
     memory::valid_32bit_address,
@@ -83,6 +84,16 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
         core.write_core_reg(NPC.id, vector_table_addr as u32 + 4)?;
         core.write_core_reg(TBR.id, vector_table_addr as u32)?;
         core.write_core_reg(SP.id, stack_pointer)
+    }
+
+    /// Handle the resetting of an unhandled peripheral using its PlugnPlay record
+    /// for reference.
+    fn reset_unhandled_peripheral(
+        &self,
+        _pnp_record: &Record,
+        _interface: &mut Leon3CommunicationInterface,
+    ) -> Result<(), crate::Error> {
+        Ok(())
     }
 }
 

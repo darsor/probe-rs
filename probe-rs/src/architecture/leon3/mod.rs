@@ -8,6 +8,7 @@ use crate::{
     architecture::leon3::{
         communication_interface::{Leon3CommunicationInterface, Leon3Error},
         dsu3::{Asr17, DsuBrss, DsuCtrl, DsuDtr, Psr},
+        peripherals::Peripheral,
         registers::{IuSpecialReg, Leon3RegisterId},
         sequences::Leon3DebugSequence,
     },
@@ -18,6 +19,7 @@ pub mod ahbjtag;
 pub mod assembly;
 pub mod communication_interface;
 mod dsu3;
+pub mod peripherals;
 mod plugnplay;
 pub mod registers;
 pub mod sequences;
@@ -162,7 +164,17 @@ impl<'state> CoreInterface for Leon3<'state> {
         if !self.interface.core_in_debug_mode()? {
             return Err(Leon3Error::Other("Core must be in debug mode to reset"))?;
         }
-        // TODO IRQMP: disable and clear all interrupts
+        // reset all peripherals
+        for peripheral in self.interface.peripherals.clone() {
+            match peripheral {
+                Peripheral::Handled(resetable_peripheral) => {
+                    resetable_peripheral.reset(self.interface.as_memory_interface_mut())?
+                }
+                Peripheral::Unhandled(record) => self
+                    .sequence
+                    .reset_unhandled_peripheral(&record, &mut self.interface)?,
+            };
+        }
         // clear error/halt mode
         self.interface.modify_dsu_reg(|r: &mut DsuCtrl| {
             r.set_pe(true);

@@ -1,13 +1,17 @@
 //! Interface for controlling LEON3 cores.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     CoreInformation, Error as ProbeRsError, MemoryInterface, RegisterId,
     architecture::leon3::{
         ahbjtag::AhbJtagError,
         dsu3::{Dsu3, Dsu3State, DsuCtrl, DsuRegister, Psr},
-        plugnplay::{Device, GaislerDevice, PlugnPlayState},
+        peripherals::{Peripheral, irqmp::Irqmp},
+        plugnplay::{self, Device, GaislerDevice},
         registers::Leon3RegisterId,
     },
     probe::DebugProbeError,
@@ -74,8 +78,7 @@ pub struct Leon3CommunicationInterface<'state> {
     core_index: usize,
     probe: &'state mut BusAccess,
     pub(crate) dsu: Dsu3<'state>,
-    #[expect(dead_code)]
-    plugnplay: &'state PlugnPlayState,
+    pub(crate) peripherals: &'state Vec<Peripheral>,
 }
 
 impl<'state> Leon3CommunicationInterface<'state> {
@@ -86,8 +89,8 @@ impl<'state> Leon3CommunicationInterface<'state> {
         state: &'state mut Leon3DebugInterfaceState,
     ) -> Result<Self, crate::Error> {
         let Leon3DebugInterfaceState {
-            plugnplay,
             dsu: dsu_state,
+            peripherals,
         } = state;
         let dsu = Dsu3::new(dsu_state);
 
@@ -95,7 +98,7 @@ impl<'state> Leon3CommunicationInterface<'state> {
             core_index,
             probe,
             dsu,
-            plugnplay,
+            peripherals,
         })
     }
 
@@ -230,18 +233,20 @@ impl<'state> Leon3CommunicationInterface<'state> {
 /// The combined state of a LEON3's DSU3 debug module and its transport interface.
 #[derive(Debug)]
 pub(crate) struct Leon3DebugInterfaceState {
-    plugnplay: PlugnPlayState,
     dsu: Dsu3State,
+    peripherals: Vec<Peripheral>,
 }
 
 impl Leon3DebugInterfaceState {
     pub fn try_attach<'probe>(
         probe: &'probe mut dyn MemoryInterface,
     ) -> Result<Self, crate::Error> {
-        let plugnplay = PlugnPlayState::scan_plugnplay(probe)?;
-        let dsu3_record = plugnplay
-            .find_device(Device::Gaisler(GaislerDevice::LEON3DSU))
+        let mut plugnplay = plugnplay::scan_plugnplay(probe)?;
+        let dsu_idx = plugnplay
+            .iter()
+            .position(|record| record.device == Device::Gaisler(GaislerDevice::LEON3DSU))
             .ok_or(Leon3Error::Dsu3NotFound)?;
+        let dsu3_record = plugnplay.swap_remove(dsu_idx);
         let dsu3_base_address = dsu3_record
             .address_spaces
             .first()
@@ -249,9 +254,20 @@ impl Leon3DebugInterfaceState {
             .addresses
             .start;
 
+        let peripherals = plugnplay
+            .into_iter()
+            .map(|record| match record {
+                plugnplay::Record {
+                    device: Device::Gaisler(GaislerDevice::IRQMP),
+                    ..
+                } => Peripheral::Handled(Arc::new(Irqmp::new(record))),
+                _ => Peripheral::Unhandled(record),
+            })
+            .collect();
+
         Ok(Self {
-            plugnplay: plugnplay,
             dsu: Dsu3State::new(dsu3_base_address),
+            peripherals,
         })
     }
 }

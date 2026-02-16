@@ -20,13 +20,7 @@ const PNP_APB_RECORD_SIZE: u64 = 8;
 /// bus controllers only supports up to 16.
 const PNP_NUM_APB_RECORDS: u64 = 16;
 
-#[derive(Debug)]
-pub struct PlugnPlayState {
-    devices: Vec<Record>,
-}
-
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
 pub struct Record {
     pub kind: RecordKind,
     pub device: Device,
@@ -43,7 +37,6 @@ pub enum RecordKind {
 }
 
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
 pub struct AddressSpace {
     pub addresses: Range<u64>,
     pub prefetchable: bool,
@@ -167,108 +160,99 @@ impl AddressSpace {
     }
 }
 
-impl PlugnPlayState {
-    fn scan_ahb(
-        mem: &mut dyn MemoryInterface,
-        base_addr: u64,
-        num_records: u64,
-        kind: RecordKind,
-    ) -> Result<Vec<Record>, crate::Error> {
-        Ok((0..num_records)
-            .map(move |record_idx| base_addr + record_idx * PNP_AHB_RECORD_SIZE)
-            .map(|record_address| -> Result<_, crate::Error> {
-                let mut record_data = [0u32; 8];
-                mem.read_32(record_address, &mut record_data)
-                    .map_err(|err| Leon3Error::PlugnPlayFailure {
-                        source: Box::new(err),
-                    })?;
-                Ok(record_data)
-            })
-            .filter_map(move |record_data| match record_data {
-                Ok(data) => Record::from_ahb_data(&data, kind).map(Ok),
-                Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
-                    source: Box::new(e),
-                }))),
-            })
-            .collect::<Result<Vec<_>, _>>()?)
+fn scan_ahb(
+    mem: &mut dyn MemoryInterface,
+    base_addr: u64,
+    num_records: u64,
+    kind: RecordKind,
+) -> Result<Vec<Record>, crate::Error> {
+    Ok((0..num_records)
+        .map(move |record_idx| base_addr + record_idx * PNP_AHB_RECORD_SIZE)
+        .map(|record_address| -> Result<_, crate::Error> {
+            let mut record_data = [0u32; 8];
+            mem.read_32(record_address, &mut record_data)
+                .map_err(|err| Leon3Error::PlugnPlayFailure {
+                    source: Box::new(err),
+                })?;
+            Ok(record_data)
+        })
+        .filter_map(move |record_data| match record_data {
+            Ok(data) => Record::from_ahb_data(&data, kind).map(Ok),
+            Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
+                source: Box::new(e),
+            }))),
+        })
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn scan_apb(
+    mem: &mut dyn MemoryInterface,
+    apb_base_addr: u64,
+    num_records: u64,
+) -> Result<Vec<Record>, crate::Error> {
+    Ok((0..num_records)
+        .map(move |record_idx| apb_base_addr + PNP_APB_OFFSET + record_idx * PNP_APB_RECORD_SIZE)
+        .map(|record_address| -> Result<_, crate::Error> {
+            let mut record_data = [0u32; 2];
+            mem.read_32(u64::from(record_address), &mut record_data)
+                .map_err(|err| Leon3Error::PlugnPlayFailure {
+                    source: Box::new(err),
+                })?;
+            Ok(record_data)
+        })
+        .filter_map(move |record_data| match record_data {
+            Ok(data) => Record::from_apb_data(u64::from(apb_base_addr), &data).map(Ok),
+            Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
+                source: Box::new(e),
+            }))),
+        })
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+pub(crate) fn scan_plugnplay(mem: &mut dyn MemoryInterface) -> Result<Vec<Record>, crate::Error> {
+    let masters = scan_ahb(
+        mem,
+        PNP_AHB_MASTER_ADDRESS,
+        PNP_NUM_AHB_MASTER_RECORDS,
+        RecordKind::AhbMaster,
+    )?;
+    let slaves = scan_ahb(
+        mem,
+        PNP_AHB_SLAVE_ADDRESS,
+        PNP_NUM_AHB_SLAVE_RECORDS,
+        RecordKind::AhbSlave,
+    )?;
+    let apb_slaves = slaves
+        .iter()
+        .filter_map(|slave| {
+            if matches!(
+                slave.device,
+                Device::Gaisler(GaislerDevice::APBMST) | Device::Gaisler(GaislerDevice::APB3MST)
+            ) {
+                let apb_base_addr = slave
+                    .address_spaces
+                    .get(0)
+                    .expect("APB Bus should have a P&P AHB address space")
+                    .addresses
+                    .start;
+                Some(scan_apb(mem, apb_base_addr, PNP_NUM_APB_RECORDS))
+            } else {
+                None
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut devices = masters;
+    devices.extend(slaves);
+    for apb in apb_slaves {
+        devices.extend(apb);
     }
 
-    fn scan_apb(
-        mem: &mut dyn MemoryInterface,
-        apb_base_addr: u64,
-        num_records: u64,
-    ) -> Result<Vec<Record>, crate::Error> {
-        Ok((0..num_records)
-            .map(move |record_idx| {
-                apb_base_addr + PNP_APB_OFFSET + record_idx * PNP_APB_RECORD_SIZE
-            })
-            .map(|record_address| -> Result<_, crate::Error> {
-                let mut record_data = [0u32; 2];
-                mem.read_32(u64::from(record_address), &mut record_data)
-                    .map_err(|err| Leon3Error::PlugnPlayFailure {
-                        source: Box::new(err),
-                    })?;
-                Ok(record_data)
-            })
-            .filter_map(move |record_data| match record_data {
-                Ok(data) => Record::from_apb_data(u64::from(apb_base_addr), &data).map(Ok),
-                Err(e) => Some(Err(crate::Error::Leon3(Leon3Error::PlugnPlayFailure {
-                    source: Box::new(e),
-                }))),
-            })
-            .collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub(crate) fn scan_plugnplay(mem: &mut dyn MemoryInterface) -> Result<Self, crate::Error> {
-        let masters = Self::scan_ahb(
-            mem,
-            PNP_AHB_MASTER_ADDRESS,
-            PNP_NUM_AHB_MASTER_RECORDS,
-            RecordKind::AhbMaster,
-        )?;
-        let slaves = Self::scan_ahb(
-            mem,
-            PNP_AHB_SLAVE_ADDRESS,
-            PNP_NUM_AHB_SLAVE_RECORDS,
-            RecordKind::AhbSlave,
-        )?;
-        let apb_slaves = slaves
-            .iter()
-            .filter_map(|slave| {
-                if matches!(
-                    slave.device,
-                    Device::Gaisler(GaislerDevice::APBMST)
-                        | Device::Gaisler(GaislerDevice::APB3MST)
-                ) {
-                    let apb_base_addr = slave
-                        .address_spaces
-                        .get(0)
-                        .expect("APB Bus should have a P&P AHB address space")
-                        .addresses
-                        .start;
-                    Some(Self::scan_apb(mem, apb_base_addr, PNP_NUM_APB_RECORDS))
-                } else {
-                    None
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut devices = masters;
-        devices.extend(slaves);
-        for apb in apb_slaves {
-            devices.extend(apb);
-        }
-
-        tracing::info!("Plug&Play scan complete: {devices:#?}");
-        Ok(Self { devices })
-    }
-
-    pub(crate) fn find_device(&self, device: Device) -> Option<&Record> {
-        self.devices.iter().find(|record| record.device == device)
-    }
+    tracing::info!("Plug&Play scan complete: {devices:#?}");
+    Ok(devices)
 }
 
 /// Vendor codes
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Device {
     Reserved,
     Gaisler(GaislerDevice),
@@ -305,7 +289,7 @@ impl Display for Device {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum GaislerDevice {
     LEON2DSU,
     LEON3,
