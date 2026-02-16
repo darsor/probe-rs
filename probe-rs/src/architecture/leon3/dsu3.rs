@@ -29,26 +29,36 @@ impl<'state> Dsu3<'state> {
         Ok(self.state.base_addr + (core_index as u64) << 24)
     }
 
-    pub fn read_reg<R: MemoryMappedRegister<u32>>(
+    /// Get the address of a register with the core offset included.
+    fn dsu_reg_address<R: DsuRegister>(&self, mut core_index: usize) -> Result<u64, crate::Error> {
+        if R::USES_CORE0_OFFSET {
+            core_index = 0;
+        }
+        Ok(R::get_mmio_address_from_base(
+            self.base_address(core_index)?,
+        )?)
+    }
+
+    pub fn read_reg<R: DsuRegister>(
         &self,
         ahb: &mut dyn MemoryInterface,
         core_index: usize,
     ) -> Result<R, crate::Error> {
-        let addr = R::get_mmio_address_from_base(self.base_address(core_index)?)?;
+        let addr = self.dsu_reg_address::<R>(core_index)?;
         Ok(R::from(ahb.read_word_32(addr)?))
     }
 
-    pub fn write_reg<R: MemoryMappedRegister<u32>>(
+    pub fn write_reg<R: DsuRegister>(
         &self,
         value: R,
         ahb: &mut dyn MemoryInterface,
         core_index: usize,
     ) -> Result<(), crate::Error> {
-        let addr = R::get_mmio_address_from_base(self.base_address(core_index)?)?;
+        let addr = self.dsu_reg_address::<R>(core_index)?;
         ahb.write_word_32(addr, value.into())
     }
 
-    pub fn modify_reg<R: MemoryMappedRegister<u32>, T>(
+    pub fn modify_reg<R: DsuRegister, T>(
         &self,
         ahb: &mut dyn MemoryInterface,
         core_index: usize,
@@ -153,6 +163,20 @@ impl IuSpecialReg {
         }
     }
 }
+
+pub trait DsuRegister: MemoryMappedRegister<u32> {
+    /// Set true for DSU registers that only exist at the core 0 offset
+    /// but have bits for each core.
+    const USES_CORE0_OFFSET: bool = false;
+}
+
+impl DsuRegister for DsuCtrl {}
+impl DsuRegister for DsuBrss {
+    const USES_CORE0_OFFSET: bool = true;
+}
+impl DsuRegister for DsuDbgm {}
+impl DsuRegister for DsuDtr {}
+impl DsuRegister for Psr {}
 
 memory_mapped_bitfield_register! {
     /// DSU Control Register (GRLIB IP Core User's Manual 32.6.1)

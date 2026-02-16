@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::{
     CoreInformation, Error as ProbeRsError, MemoryInterface, MemoryMappedRegister, RegisterId,
     architecture::leon3::{
-        dsu3::{Dsu3, Dsu3State, DsuCtrl, Psr},
+        dsu3::{Dsu3, Dsu3State, DsuCtrl, DsuRegister, Psr},
         plugnplay::{Device, GaislerDevice, PlugnPlayState},
         registers::Leon3RegisterId,
     },
@@ -114,18 +114,15 @@ impl<'state> Leon3CommunicationInterface<'state> {
         Ok(ctrl.dm())
     }
 
-    pub(crate) fn read_dsu_reg<R: MemoryMappedRegister<u32>>(&mut self) -> Result<R, crate::Error> {
+    pub(crate) fn read_dsu_reg<R: DsuRegister>(&mut self) -> Result<R, crate::Error> {
         self.dsu.read_reg(self.probe, self.core_index)
     }
 
-    pub(crate) fn write_dsu_reg<R: MemoryMappedRegister<u32>>(
-        &mut self,
-        value: R,
-    ) -> Result<(), crate::Error> {
+    pub(crate) fn write_dsu_reg<R: DsuRegister>(&mut self, value: R) -> Result<(), crate::Error> {
         self.dsu.write_reg(value, self.probe, self.core_index)
     }
 
-    pub fn modify_dsu_reg<R: MemoryMappedRegister<u32>, T>(
+    pub fn modify_dsu_reg<R: DsuRegister, T>(
         &mut self,
         f: impl Fn(&mut R) -> T,
     ) -> Result<T, crate::Error> {
