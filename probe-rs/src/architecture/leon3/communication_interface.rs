@@ -21,9 +21,6 @@ pub enum Leon3Error {
     /// An error with operating the debug probe occurred.
     #[error("Debug Probe Error")]
     DebugProbe(#[from] DebugProbeError),
-    /// A region outside of the AHB address space was accessed.
-    #[error("Out of bounds memory access")]
-    OutOfBounds,
     /// Failed to scan plugnplay region.
     #[error("Failed to scan plug&play region")]
     PlugnPlayFailure {

@@ -6,11 +6,10 @@ use scroll::Pread as _;
 
 use crate::{
     MemoryInterface,
-    architecture::leon3::communication_interface::Leon3Error,
-    memory::{InvalidDataLengthError, MemoryNotAlignedError, valid_32bit_address},
+    memory::{InvalidDataLengthError, MemoryNotAlignedError},
     probe::{
-        CommandQueue, CommandResult, DeferredResultIndex, DeferredResultSet, JtagCommand,
-        JtagWriteCommand, Probe, ShiftDrCommand,
+        CommandQueue, CommandResult, DebugProbeError, DeferredResultIndex, DeferredResultSet,
+        JtagCommand, JtagWriteCommand, Probe, ShiftDrCommand,
     },
 };
 
@@ -20,12 +19,24 @@ const DDATA_LEN: u32 = 33;
 /// Some error occurred when working with the AHBJTAG interface.
 #[derive(thiserror::Error, Debug)]
 pub enum AhbJtagError {
+    /// An error with the usage of the probe occurred
+    #[error("An error occured when using the debug probe.")]
+    Probe(#[from] DebugProbeError),
     /// A sequential transaction was attempted before the previous one finished.
     #[error("Previous AHB transaction did not complete.")]
     TransactionNotFinished,
     /// The result index of a batched command is not available.
     #[error("The requested data is not available due to a previous error.")]
     BatchedResultNotAvailable,
+    /// Address is out of range for a 32-bit address space.
+    #[error("Address {0:#08X} is out of range for a 32-bit address space.")]
+    AddressOutOfRange(u64),
+    /// Memory access to address {0.address:#X?} was not aligned to {0.alignment} bytes.
+    #[error(transparent)]
+    MemoryNotAligned(#[from] MemoryNotAlignedError),
+    /// The data buffer had an invalid length.
+    #[error(transparent)]
+    InvalidDataLength(#[from] InvalidDataLengthError),
 }
 
 /// AHBJTAG driver used to access the AHB bus through JTAG.
@@ -260,7 +271,7 @@ impl AhbJtag {
         index
     }
 
-    fn execute(&mut self) -> Result<(), Leon3Error> {
+    fn execute(&mut self) -> Result<(), AhbJtagError> {
         let probe = self
             .probe
             .try_as_jtag_probe()
@@ -274,9 +285,9 @@ impl AhbJtag {
                 return Ok(());
             }
             Err(e) => match e.error {
-                crate::Error::Leon3(error) => return Err(error),
+                crate::Error::AhbJtag(e) => return Err(e),
                 crate::Error::Probe(error) => return Err(error.into()),
-                _other => unreachable!(),
+                _other => unreachable!("All error cases should be handled"),
             },
         }
     }
@@ -284,7 +295,7 @@ impl AhbJtag {
     fn read_deferred_result(
         &mut self,
         index: DeferredResultIndex,
-    ) -> Result<CommandResult, Leon3Error> {
+    ) -> Result<CommandResult, AhbJtagError> {
         match self.state.jtag_results.take(index) {
             Ok(result) => Ok(result),
             Err(index) => {
@@ -294,7 +305,6 @@ impl AhbJtag {
                     .jtag_results
                     .take(index)
                     .map_err(|_| AhbJtagError::BatchedResultNotAvailable)
-                    .map_err(Leon3Error::AhbJtag)
             }
         }
     }
@@ -327,7 +337,7 @@ impl AhbJtag {
 
     fn transform_first_write_ddata(
         _command: &impl Into<JtagCommand>,
-        response_bits: &BitSlice,
+        _response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         // seq is always 0 for first write, can't fail
         Ok(CommandResult::None)
@@ -404,7 +414,7 @@ impl AhbJtag {
 
         if !seq {
             // transfer not yet complete
-            Err(Leon3Error::AhbJtag(AhbJtagError::TransactionNotFinished).into())
+            Err(crate::Error::AhbJtag(AhbJtagError::TransactionNotFinished))
         } else {
             Ok(())
         }
@@ -415,8 +425,8 @@ impl AhbJtag {
     /// The address must be aligned to 4 bytes. The SEQ flag is used for efficient
     /// sequential reads. The timeout is for a single word transaction, not the
     /// full read.
-    fn read32(&mut self, address: u32, data: &mut [u32]) -> Result<(), Leon3Error> {
-        check_out_of_bounds(address, data.len() * 4)?;
+    fn read32(&mut self, address: u32, data: &mut [u32]) -> Result<(), AhbJtagError> {
+        check_out_of_bounds(address as u64, data.len() * 4)?;
         let mut results = Vec::with_capacity(1024 / 4);
         let max_address = 4 * (data.len()) as u32;
 
@@ -454,7 +464,7 @@ impl AhbJtag {
     /// Read a single 16-bit word from the target at the given address.
     ///
     /// The address must be aligned to 2 bytes.
-    fn read16(&mut self, address: u32) -> Result<u16, Leon3Error> {
+    fn read16(&mut self, address: u32) -> Result<u16, AhbJtagError> {
         self.schedule_write_adata(address, TransactionKind::Read, TransactionSize::U16);
         let result = self.schedule_read_ddata(Seq::LastTransaction);
         self.read_deferred_result(result)
@@ -462,7 +472,7 @@ impl AhbJtag {
     }
 
     /// Read a single byte from the target at the given address.
-    fn read8(&mut self, address: u32) -> Result<u8, Leon3Error> {
+    fn read8(&mut self, address: u32) -> Result<u8, AhbJtagError> {
         self.schedule_write_adata(address, TransactionKind::Read, TransactionSize::U8);
         let result = self.schedule_read_ddata(Seq::LastTransaction);
         self.read_deferred_result(result).map(|data| data.into_u8())
@@ -472,8 +482,8 @@ impl AhbJtag {
     ///
     /// The address must be aligned to 4 bytes. The SEQ flag is used for efficient
     /// sequential writes.
-    fn write32(&mut self, address: u32, data: &[u32]) -> Result<(), Leon3Error> {
-        check_out_of_bounds(address, data.len() * 4)?;
+    fn write32(&mut self, address: u32, data: &[u32]) -> Result<(), AhbJtagError> {
+        check_out_of_bounds(address as u64, data.len() * 4)?;
 
         // Sequential transfers should not cross a 1 kB boundary.
         // Process transfers in chunks within 1024-byte boundaries
@@ -502,39 +512,37 @@ impl AhbJtag {
     /// Write a single 16-bit word to the target at the given address.
     ///
     /// The address must be aligned to 2 bytes.
-    fn write16(&mut self, address: u32, data: u16) -> Result<(), Leon3Error> {
+    fn write16(&mut self, address: u32, data: u16) -> Result<(), AhbJtagError> {
         self.schedule_write_adata(address, TransactionKind::Write, TransactionSize::U16);
         self.schedule_write_ddata(TransactionData::U16(data), Seq::LastTransaction);
         self.execute()
     }
 
     /// Write a single byte to the target at the given address.
-    fn write8(&mut self, address: u32, data: u8) -> Result<(), Leon3Error> {
+    fn write8(&mut self, address: u32, data: u8) -> Result<(), AhbJtagError> {
         self.schedule_write_adata(address, TransactionKind::Write, TransactionSize::U8);
         self.schedule_write_ddata(TransactionData::U8(data), Seq::LastTransaction);
         self.execute()
     }
 }
 
-fn check_out_of_bounds(address: u32, num_bytes: usize) -> Result<(), Leon3Error> {
-    if num_bytes > 0 {
-        let num_bytes =
-            u32::try_from(num_bytes).expect("Number of bytes to read should fit in u32");
-        address
-            .checked_add(num_bytes - 1)
-            .ok_or(Leon3Error::OutOfBounds)
-            .map(|_| {})
-    } else {
-        Ok(())
-    }
+fn valid_32bit_address(address: u64) -> Result<u32, AhbJtagError> {
+    crate::memory::valid_32bit_address(address)
+        .map_err(|_| AhbJtagError::AddressOutOfRange(address))
 }
 
-fn check_alignment(address: u64, alignment: u64) -> Result<(), crate::Error> {
+fn check_out_of_bounds(address: u64, num_bytes: usize) -> Result<(), AhbJtagError> {
+    let max_address = address + num_bytes as u64 - 1;
+    valid_32bit_address(max_address)?;
+    Ok(())
+}
+
+fn check_alignment(address: u64, alignment: u64) -> Result<(), MemoryNotAlignedError> {
     if !address.is_multiple_of(alignment) {
-        return Err(crate::Error::MemoryNotAligned(MemoryNotAlignedError {
+        return Err(MemoryNotAlignedError {
             address,
             alignment: usize::try_from(alignment).expect("Alignment should fit in a usize"),
-        }));
+        });
     }
     Ok(())
 }
@@ -576,7 +584,8 @@ impl MemoryInterface for AhbJtag {
 
     fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), crate::Error> {
         check_alignment(address, 4)?;
-        let address = valid_32bit_address(address)?;
+        let address =
+            valid_32bit_address(address).map_err(|_| AhbJtagError::AddressOutOfRange(address))?;
         self.read32(address, data)?;
         Ok(())
     }
@@ -584,7 +593,7 @@ impl MemoryInterface for AhbJtag {
     fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), crate::Error> {
         check_alignment(address, 2)?;
         let address = valid_32bit_address(address)?;
-        check_out_of_bounds(address, data.len() * 2)?;
+        check_out_of_bounds(address as u64, data.len() * 2)?;
         for (word_idx, word16) in data.iter_mut().enumerate() {
             *word16 = self.read16(address + 2 * word_idx as u32)?;
         }
@@ -593,7 +602,7 @@ impl MemoryInterface for AhbJtag {
 
     fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), crate::Error> {
         let address = valid_32bit_address(address)?;
-        check_out_of_bounds(address, data.len())?;
+        check_out_of_bounds(address as u64, data.len())?;
         for (byte_idx, byte) in data.iter_mut().enumerate() {
             *byte = self.read8(address + byte_idx as u32)?;
         }
@@ -635,7 +644,7 @@ impl MemoryInterface for AhbJtag {
     fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), crate::Error> {
         check_alignment(address, 2)?;
         let address = valid_32bit_address(address)?;
-        check_out_of_bounds(address, data.len() * 2)?;
+        check_out_of_bounds(address as u64, data.len() * 2)?;
         for (word_idx, word16) in data.iter().enumerate() {
             self.write16(address + 2 * word_idx as u32, *word16)?;
         }
@@ -644,7 +653,7 @@ impl MemoryInterface for AhbJtag {
 
     fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), crate::Error> {
         let address = valid_32bit_address(address)?;
-        check_out_of_bounds(address, data.len())?;
+        check_out_of_bounds(address as u64, data.len())?;
         for (byte_idx, byte) in data.iter().enumerate() {
             self.write8(address + byte_idx as u32, *byte)?;
         }

@@ -10,7 +10,7 @@ use crate::{
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
         leon3::{
-            ahbjtag::AhbJtag,
+            ahbjtag::{AhbJtag, AhbJtagError},
             communication_interface::{Leon3CommunicationInterface, Leon3DebugInterfaceState},
         },
         riscv::communication_interface::{
