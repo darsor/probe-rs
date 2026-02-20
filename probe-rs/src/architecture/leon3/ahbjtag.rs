@@ -712,4 +712,42 @@ impl MemoryInterface for AhbJtag {
         self.write_32(address, &buffer)?;
         Ok(())
     }
+
+    fn write(&mut self, mut address: u64, mut data: &[u8]) -> Result<(), crate::Error> {
+        let len = data.len();
+        let start_extra_count = ((4 - (address % 4) as usize) % 4).min(len);
+        let end_extra_count = (len - start_extra_count) % 4;
+        let inbetween_count = len - start_extra_count - end_extra_count;
+        assert!(start_extra_count < 4);
+        assert!(end_extra_count < 4);
+        assert!(inbetween_count.is_multiple_of(4));
+
+        if start_extra_count != 0 {
+            // We first do an 8 bit write of the first < 4 bytes up until the 4 byte aligned boundary.
+            self.write_8(address, &data[..start_extra_count])?;
+
+            address += start_extra_count as u64;
+            data = &data[start_extra_count..];
+        }
+
+        // Make sure we don't try to do an empty but potentially unaligned write
+        if inbetween_count > 0 {
+            // We do a 32 bit write of the remaining bytes that are 4 byte aligned.
+            let mut buffer = vec![0u32; inbetween_count / 4];
+            for (bytes, value) in data.chunks_exact(4).zip(buffer.iter_mut()) {
+                *value = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            }
+            self.write_32(address, &buffer)?;
+
+            address += inbetween_count as u64;
+            data = &data[inbetween_count..];
+        }
+
+        // We write the remaining bytes that we did not write yet which is always n < 4.
+        if end_extra_count > 0 {
+            self.write_8(address, &data[..end_extra_count])?;
+        }
+
+        Ok(())
+    }
 }
