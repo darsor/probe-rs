@@ -1,15 +1,14 @@
-// TODO(darsor): pub use stuff that other architectures pub use
-// TODO(darsor): rename things from LEON3 to SPARC or SPARCV8 as appropriate
-
+//! All the interface bits for LEON3.
+//!
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    BreakpointCause, CoreInformation, CoreInterface, CoreStatus, HaltReason, MemoryInterface,
-    RegisterId, RegisterValue,
+    BreakpointCause, CoreInformation, CoreInterface, CoreStatus, HaltReason, RegisterId,
+    RegisterValue,
     architecture::leon3::{
         communication_interface::{Leon3CommunicationInterface, Leon3Error},
         dsu3::{Asr17, DsuBrss, DsuCtrl, DsuDtr, Psr},
-        registers::{IuCoreReg, IuSpecialReg, Leon3RegisterId},
+        registers::{IuSpecialReg, Leon3RegisterId},
         sequences::Leon3DebugSequence,
     },
     memory::CoreMemoryInterface,
@@ -32,8 +31,7 @@ pub struct Leon3<'state> {
 }
 
 impl<'state> Leon3<'state> {
-    pub fn new(
-        // TODO(darsor): is this used?
+    pub(crate) fn new(
         core_index: usize,
         interface: Leon3CommunicationInterface<'state>,
         state: &'state mut Leon3CoreState,
@@ -47,7 +45,7 @@ impl<'state> Leon3<'state> {
         };
 
         if !this.state.initialized {
-            this.interface.on_first_attach();
+            this.interface.on_first_attach()?;
             this.state.initialized = true;
         }
 

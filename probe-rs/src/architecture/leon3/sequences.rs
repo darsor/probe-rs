@@ -1,10 +1,12 @@
+//! Debug sequences to operate special requirements LEON3 targets.
+
 use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     Session,
     architecture::leon3::{
         communication_interface::{Leon3CommunicationInterface, Leon3Error},
-        registers::{Leon3RegisterId, NPC, PC, SP, TBR},
+        registers::{NPC, PC, SP, TBR},
     },
     memory::valid_32bit_address,
 };
@@ -29,7 +31,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
     /// out of reset.
     fn reset_catch_set(
         &self,
-        interface: &mut Leon3CommunicationInterface,
+        _interface: &mut Leon3CommunicationInterface,
     ) -> Result<(), Leon3Error> {
         return Err(Leon3Error::ResetHaltRequestNotSupported);
     }
@@ -37,7 +39,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
     /// Free hardware resources allocated by ResetCatchSet.
     fn reset_catch_clear(
         &self,
-        interface: &mut Leon3CommunicationInterface,
+        _interface: &mut Leon3CommunicationInterface,
     ) -> Result<(), Leon3Error> {
         return Err(Leon3Error::ResetHaltRequestNotSupported);
     }

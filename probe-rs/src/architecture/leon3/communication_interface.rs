@@ -1,7 +1,9 @@
+//! Interface for controlling LEON3 cores.
+
 use std::time::{Duration, Instant};
 
 use crate::{
-    CoreInformation, Error as ProbeRsError, MemoryInterface, MemoryMappedRegister, RegisterId,
+    CoreInformation, Error as ProbeRsError, MemoryInterface, RegisterId,
     architecture::leon3::{
         ahbjtag::AhbJtagError,
         dsu3::{Dsu3, Dsu3State, DsuCtrl, DsuRegister, Psr},
@@ -24,6 +26,7 @@ pub enum Leon3Error {
     /// Failed to scan plugnplay region.
     #[error("Failed to scan plug&play region")]
     PlugnPlayFailure {
+        /// Source of the error
         source: Box<dyn std::error::Error + 'static + Send + Sync>,
     },
     /// DSU3 not found.
@@ -31,7 +34,10 @@ pub enum Leon3Error {
     Dsu3NotFound,
     /// Core out of range.
     #[error("Core index {core_index} out of range (max 15)")]
-    CoreOutOfRange { core_index: usize },
+    CoreOutOfRange {
+        /// The invalid core index that attempted access
+        core_index: usize,
+    },
     /// Invalid register ID.
     #[error("Invalid Register ID: {0:?}")]
     InvalidRegisterId(RegisterId),
@@ -68,11 +74,13 @@ pub struct Leon3CommunicationInterface<'state> {
     core_index: usize,
     probe: &'state mut BusAccess,
     pub(crate) dsu: Dsu3<'state>,
+    #[expect(dead_code)]
     plugnplay: &'state PlugnPlayState,
 }
 
 impl<'state> Leon3CommunicationInterface<'state> {
-    pub fn try_attach(
+    /// Construct a new communication interface
+    pub(crate) fn try_attach(
         core_index: usize,
         probe: &'state mut BusAccess,
         state: &'state mut Leon3DebugInterfaceState,
@@ -91,10 +99,12 @@ impl<'state> Leon3CommunicationInterface<'state> {
         })
     }
 
+    /// Use the communication interface as a memory interface.
     pub fn as_memory_interface(&self) -> &dyn MemoryInterface {
         self.probe
     }
 
+    /// Use the communication interface as a memory interface.
     pub fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface {
         self.probe
     }
@@ -129,6 +139,7 @@ impl<'state> Leon3CommunicationInterface<'state> {
         self.dsu.write_reg(value, self.probe, self.core_index)
     }
 
+    /// Read-modify-write a DSU register.
     pub fn modify_dsu_reg<R: DsuRegister, T>(
         &mut self,
         f: impl Fn(&mut R) -> T,
@@ -136,6 +147,7 @@ impl<'state> Leon3CommunicationInterface<'state> {
         self.dsu.modify_reg(self.probe, self.core_index, f)
     }
 
+    /// Read a LEON3 core register.
     pub fn read_core_reg(&mut self, reg: Leon3RegisterId) -> Result<u32, crate::Error> {
         match reg {
             Leon3RegisterId::IuCore(iu_core_reg) => {
@@ -153,6 +165,7 @@ impl<'state> Leon3CommunicationInterface<'state> {
         }
     }
 
+    /// Write a LEON3 core register.
     pub fn write_core_reg(&mut self, reg: Leon3RegisterId, value: u32) -> Result<(), crate::Error> {
         match reg {
             Leon3RegisterId::IuCore(iu_core_reg) => {

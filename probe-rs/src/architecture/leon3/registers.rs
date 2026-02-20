@@ -8,10 +8,15 @@ use crate::{
     core::{CoreRegister, RegisterDataType, RegisterId, RegisterRole, UnwindRule},
 };
 
+/// Leon3-specific register ID. Use `.into()` to convert to [`RegisterId`] and
+/// `.try_into()` for the other direction.
 #[derive(Clone, Copy)]
 pub enum Leon3RegisterId {
+    /// Core Integer Unit register (g0-7, i0-7, l0-7, o0-7)
     IuCore(IuCoreReg),
+    /// Special Integer Unit register (PSR, PC, etc.)
     IuSpecial(IuSpecialReg),
+    /// FPU register
     Fpu(FpuReg),
 }
 
@@ -102,29 +107,46 @@ impl TryFrom<RegisterId> for Leon3RegisterId {
     }
 }
 
+/// Core Integer Unit register (g0-7, i0-7, l0-7, o0-7)
 #[derive(Clone, Copy)]
 pub enum IuCoreReg {
+    /// Global register g0-g7
     G(u8),
+    /// Windowed output register o0-o7
     O(u8),
+    /// Windowed local register l0-l7
     L(u8),
+    /// Windowed input register i0-i7
     I(u8),
 }
 
+/// Special Integer Unit register (PSR, PC, etc.)
 #[derive(Clone, Copy)]
 pub enum IuSpecialReg {
+    /// Multiply/divide register
     Y,
+    /// Processor state register
     PSR,
+    /// Window invalid mask register
     WIM,
+    /// Trap base register
     TBR,
+    /// Program counter register
     PC,
+    /// Next program counter register
     NPC,
+    /// Floating-point state register
     FSR,
+    /// Coprocessor state register
     CPSR,
+    /// Ancillary state register
     ASR(u8),
 }
 
+/// FPU register
 #[derive(Clone, Copy)]
 pub enum FpuReg {
+    /// Floating-point register
     F(u8),
 }
 

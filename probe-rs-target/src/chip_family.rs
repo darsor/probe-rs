@@ -343,6 +343,12 @@ impl ChipFamily {
                             core.core_type, core.name
                         ));
                     }
+                    CoreAccessOptions::Leon3(_) if !core.core_type.is_sparc() => {
+                        return Err(format!(
+                            "Leon3 options don't match core type {:?} on core {}",
+                            core.core_type, core.name
+                        ));
+                    }
                     CoreAccessOptions::Arm(options) => {
                         if matches!(core.core_type, CoreType::Armv7a | CoreType::Armv8a)
                             && options.debug_base.is_none()

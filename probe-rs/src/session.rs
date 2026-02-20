@@ -10,7 +10,7 @@ use crate::{
             sequences::{ArmDebugSequence, DefaultArmSequence},
         },
         leon3::{
-            ahbjtag::{AhbJtag, AhbJtagError},
+            ahbjtag::AhbJtag,
             communication_interface::{Leon3CommunicationInterface, Leon3DebugInterfaceState},
         },
         riscv::communication_interface::{
@@ -114,6 +114,7 @@ impl BusAccess {
         Ok(Self::AhbJtag(AhbJtag::new(probe, config)))
     }
 
+    #[expect(dead_code)]
     fn as_probe(&mut self) -> &mut Probe {
         match self {
             BusAccess::AhbJtag(ahb_jtag) => ahb_jtag.as_probe(),
@@ -139,15 +140,6 @@ impl CoreMemoryInterface for BusAccess {
 
 enum SystemBusInterface {
     Leon3(Leon3DebugInterfaceState),
-}
-
-impl SystemBusInterface {
-    /// Returns the debug module's intended architecture.
-    fn architecture(&self) -> Architecture {
-        match self {
-            SystemBusInterface::Leon3(_) => Architecture::Sparc,
-        }
-    }
 }
 
 impl fmt::Debug for SystemBusInterface {

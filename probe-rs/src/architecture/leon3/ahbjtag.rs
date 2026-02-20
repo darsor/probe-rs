@@ -1,3 +1,5 @@
+//! AHBJTAG implementation for accessing the AHb system bus through a JTAG interface.
+
 use std::iter;
 
 use bitvec::{field::BitField as _, slice::BitSlice};
@@ -48,7 +50,7 @@ pub struct AhbJtag {
 }
 
 #[derive(Debug)]
-pub struct AhbJtagState {
+struct AhbJtagState {
     current_transaction: Option<TransactionState>,
     queued_commands: CommandQueue<JtagCommand>,
     jtag_results: DeferredResultSet<CommandResult>,
@@ -148,33 +150,10 @@ impl TransactionData {
         }
         result
     }
-
-    fn as_u8(&self) -> u8 {
-        if let TransactionData::U8(data) = self {
-            *data
-        } else {
-            panic!("Not a u8")
-        }
-    }
-
-    fn as_u16(&self) -> u16 {
-        if let TransactionData::U16(data) = self {
-            *data
-        } else {
-            panic!("Not a u16")
-        }
-    }
-
-    fn as_u32(&self) -> u32 {
-        if let TransactionData::U32(data) = self {
-            *data
-        } else {
-            panic!("Not a u32")
-        }
-    }
 }
 
 impl AhbJtag {
+    /// Construct a new AHBJTAG interface.
     pub fn new(probe: Probe, config: probe_rs_target::AhbJtag) -> Self {
         Self {
             probe,
@@ -183,6 +162,7 @@ impl AhbJtag {
         }
     }
 
+    /// Access the probe owned by the AHBJTAG interface.
     pub fn as_probe(&mut self) -> &mut Probe {
         &mut self.probe
     }

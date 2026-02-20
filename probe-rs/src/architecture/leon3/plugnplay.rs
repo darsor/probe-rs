@@ -26,6 +26,7 @@ pub struct PlugnPlayState {
 }
 
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct Record {
     pub kind: RecordKind,
     pub device: Device,
@@ -42,6 +43,7 @@ pub enum RecordKind {
 }
 
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct AddressSpace {
     pub addresses: Range<u64>,
     pub prefetchable: bool,
@@ -50,7 +52,7 @@ pub struct AddressSpace {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum AddressSpaceKind {
+pub enum AddressSpaceKind {
     ApbIO,
     AhbMemory,
     AhbIO,
@@ -198,7 +200,7 @@ impl PlugnPlayState {
     ) -> Result<Vec<Record>, crate::Error> {
         Ok((0..num_records)
             .map(move |record_idx| {
-                apb_base_addr + PNP_APB_OFFSET + record_idx * PNP_AHB_RECORD_SIZE
+                apb_base_addr + PNP_APB_OFFSET + record_idx * PNP_APB_RECORD_SIZE
             })
             .map(|record_address| -> Result<_, crate::Error> {
                 let mut record_data = [0u32; 2];
