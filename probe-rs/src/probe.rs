@@ -1555,6 +1555,18 @@ impl CommandResult {
         }
     }
 
+    /// Returns the result as a `u16` if possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the result is not a `u16`.
+    pub fn into_u16(self) -> u16 {
+        match self {
+            CommandResult::U16(val) => val,
+            _ => panic!("CommandResult is not a u16"),
+        }
+    }
+
     /// Returns the result as a `u8` if possible.
     ///
     /// # Panics

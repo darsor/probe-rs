@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::iter;
 
 use bitvec::{field::BitField as _, slice::BitSlice};
 use itertools::{Itertools as _, Position};
@@ -8,14 +8,25 @@ use crate::{
     MemoryInterface,
     architecture::leon3::communication_interface::Leon3Error,
     memory::{InvalidDataLengthError, MemoryNotAlignedError, valid_32bit_address},
-    probe::{DebugProbeError, Probe},
+    probe::{
+        CommandQueue, CommandResult, DeferredResultIndex, DeferredResultSet, JtagCommand,
+        JtagWriteCommand, Probe, ShiftDrCommand,
+    },
 };
 
 const ADATA_LEN: u32 = 35;
 const DDATA_LEN: u32 = 33;
 
-// TODO(darsor): make this configurable
-const JTAG_TIMEOUT: Duration = Duration::from_secs(2);
+/// Some error occurred when working with the AHBJTAG interface.
+#[derive(thiserror::Error, Debug)]
+pub enum AhbJtagError {
+    /// A sequential transaction was attempted before the previous one finished.
+    #[error("Previous AHB transaction did not complete.")]
+    TransactionNotFinished,
+    /// The result index of a batched command is not available.
+    #[error("The requested data is not available due to a previous error.")]
+    BatchedResultNotAvailable,
+}
 
 /// AHBJTAG driver used to access the AHB bus through JTAG.
 #[derive(Debug)]
@@ -28,19 +39,24 @@ pub struct AhbJtag {
 #[derive(Debug)]
 pub struct AhbJtagState {
     current_transaction: Option<TransactionState>,
+    queued_commands: CommandQueue<JtagCommand>,
+    jtag_results: DeferredResultSet<CommandResult>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct TransactionState {
     size: TransactionSize,
     kind: TransactionKind,
     address: u32,
+    first_access: bool,
 }
 
 impl AhbJtagState {
     pub fn new() -> Self {
         Self {
             current_transaction: None,
+            queued_commands: CommandQueue::new(),
+            jtag_results: DeferredResultSet::new(),
         }
     }
 }
@@ -79,17 +95,15 @@ impl TransactionKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Seq {
-    LastTransaction,
-    ContinuingTransaction,
+    LastTransaction = 0,
+    ContinuingTransaction = 1,
 }
 
 impl Seq {
     fn encode(self) -> u8 {
-        match self {
-            Seq::LastTransaction => 0,
-            Seq::ContinuingTransaction => 1,
-        }
+        self as u8
     }
 }
 
@@ -149,13 +163,6 @@ impl TransactionData {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum TransactionOutcome {
-    ReadDone(TransactionData),
-    WriteDone,
-    Pending,
-}
-
 impl AhbJtag {
     pub fn new(probe: Probe, config: probe_rs_target::AhbJtag) -> Self {
         Self {
@@ -169,174 +176,237 @@ impl AhbJtag {
         &mut self.probe
     }
 
-    fn write_adata(
-        &mut self,
-        address: u32,
-        kind: TransactionKind,
-        size: TransactionSize,
-    ) -> Result<(), DebugProbeError> {
-        let mut cmd = [0u8; 5];
-        cmd[0..4].copy_from_slice(&address.to_le_bytes());
-        cmd[4] = (kind.encode() << 2) | size.encode();
-        self.probe
-            .try_as_jtag_probe()
-            .expect("Should be JTAG probe")
-            .write_register(self.config.adata_addr, &cmd, ADATA_LEN)?;
+    fn schedule_write_adata(&mut self, address: u32, kind: TransactionKind, size: TransactionSize) {
         self.state.current_transaction = Some(TransactionState {
             size,
             kind,
             address,
+            first_access: true,
         });
-        tracing::debug!("Wrote ADATA: 0x{address:08X} ({kind:?}, {size:?})");
-        Ok(())
+        let mut data = vec![0u8; 5];
+        data[0..4].copy_from_slice(&address.to_le_bytes());
+        data[4] = (kind.encode() << 2) | size.encode();
+        tracing::debug!("Scheduled ADATA: 0x{address:08X} ({kind:?}, {size:?})");
+        self.state.queued_commands.schedule(JtagWriteCommand {
+            address: self.config.adata_addr,
+            data,
+            len: ADATA_LEN,
+            transform: |_, _| Ok(CommandResult::None),
+        });
     }
 
-    // TODO(darsor): batch adata and ddata reads to improve speed
-    // TODO(darsor): subsequent ddata reads don't need to write IR again (write_register does)
-    fn read_ddata_with_timeout(
-        &mut self,
-        seq: Seq,
-        timeout: Duration,
-    ) -> Result<TransactionData, Leon3Error> {
-        if seq == Seq::ContinuingTransaction {
-            if let Some(transaction) = &self.state.current_transaction {
-                assert_eq!(
-                    transaction.size,
-                    TransactionSize::U32,
-                    "Sequential reads can only be performed with U32s"
-                );
-            } else {
-                unreachable!("reading DDATA before writing ADATA");
-            }
-        }
-        let shift_in = match seq {
-            Seq::LastTransaction => [0; 5],
-            Seq::ContinuingTransaction => [0, 0, 0, 0, 1],
-        };
+    fn schedule_read_ddata(&mut self, seq: Seq) -> DeferredResultIndex {
+        let mut data = vec![0u8; 5];
+        data[4] = seq.encode();
 
-        let start_time = Instant::now();
-        loop {
-            // read DDATA
-            let result = self
-                .probe
-                .try_as_jtag_probe()
-                .expect("Should be JTAG probe")
-                .write_register(self.config.ddata_addr, &shift_in, DDATA_LEN)?;
-
-            // interpret the result
-            match self.transform_ddata_result(&result) {
-                TransactionOutcome::ReadDone(data) => {
-                    if seq == Seq::LastTransaction {
-                        self.state.current_transaction = None;
-                    }
-                    tracing::debug!("Read DDATA: {data:?} ({seq:?})");
-                    return Ok(data);
-                }
-                TransactionOutcome::Pending => {
-                    if start_time.elapsed() > timeout {
-                        return Err(Leon3Error::Timeout);
-                    }
-                }
-                TransactionOutcome::WriteDone => unreachable!("Should be reading"),
-            }
-        }
+        self.schedule_ddata(data, seq)
     }
 
-    fn write_ddata_with_timeout(
-        &mut self,
-        data: TransactionData,
-        seq: Seq,
-        timeout: Duration,
-    ) -> Result<(), Leon3Error> {
+    fn schedule_write_ddata(&mut self, data: TransactionData, seq: Seq) -> DeferredResultIndex {
         if let Some(transaction) = &self.state.current_transaction {
-            if seq == Seq::ContinuingTransaction {
-                assert_eq!(
-                    transaction.size,
-                    TransactionSize::U32,
-                    "Sequential writes can only be performed with U32s"
-                );
-            }
             assert_eq!(
                 transaction.size,
                 data.size(),
                 "DDATA write size doesn't match ADATA fields"
             );
-        } else {
-            unreachable!("writing DDATA before writing ADATA");
         }
-        let mut shift_in = match seq {
-            Seq::LastTransaction => [0; 5],
-            Seq::ContinuingTransaction => [0, 0, 0, 0, 1],
+
+        let mut cmd_data = vec![0u8; 5];
+        cmd_data[..4].copy_from_slice(&data.encode());
+        cmd_data[4] = seq.encode();
+
+        self.schedule_ddata(cmd_data, seq)
+    }
+
+    fn schedule_ddata(&mut self, data: Vec<u8>, seq: Seq) -> DeferredResultIndex {
+        let Some(transaction) = &mut self.state.current_transaction else {
+            unreachable!("writing DDATA before writing ADATA");
         };
-        shift_in[..4].copy_from_slice(&data.encode());
 
-        let start_time = Instant::now();
-        loop {
-            // write DDATA
-            let result = self
-                .probe
-                .try_as_jtag_probe()
-                .expect("Should be JTAG probe")
-                .write_register(self.config.ddata_addr, &shift_in, DDATA_LEN)?;
+        if seq == Seq::ContinuingTransaction {
+            assert_eq!(
+                transaction.size,
+                TransactionSize::U32,
+                "Sequential transactions can only be performed with U32s"
+            );
+            assert_ne!(
+                transaction.address % 1024,
+                1024 - 4,
+                "Sequential transactions shall not cross 1024-byte boundaries"
+            );
+        }
 
-            // interpret the result
-            match self.transform_ddata_result(&result) {
-                TransactionOutcome::WriteDone => {
-                    if seq == Seq::LastTransaction {
-                        // last transaction
-                        self.state.current_transaction = None;
-                    }
-                    return Ok(());
-                }
-                TransactionOutcome::Pending => {
-                    if start_time.elapsed() > timeout {
-                        return Err(Leon3Error::Timeout);
-                    }
-                }
-                TransactionOutcome::ReadDone(_) => unreachable!("Should be writing"),
+        let index = if transaction.first_access {
+            self.state.queued_commands.schedule(JtagWriteCommand {
+                address: self.config.ddata_addr,
+                data,
+                len: DDATA_LEN,
+                transform: Self::get_transform(transaction),
+            })
+        } else {
+            self.state.queued_commands.schedule(ShiftDrCommand {
+                data,
+                len: DDATA_LEN,
+                transform: Self::get_transform(transaction),
+            })
+        };
+
+        // update next transaction
+        transaction.first_access = false;
+        if seq == Seq::LastTransaction {
+            self.state.current_transaction = None;
+        }
+
+        index
+    }
+
+    fn execute(&mut self) -> Result<(), Leon3Error> {
+        let probe = self
+            .probe
+            .try_as_jtag_probe()
+            .expect("Should be JTAG probe");
+
+        let cmds = std::mem::take(&mut self.state.queued_commands);
+
+        match probe.write_register_batch(&cmds) {
+            Ok(r) => {
+                self.state.jtag_results.merge_from(r);
+                return Ok(());
+            }
+            Err(e) => match e.error {
+                crate::Error::Leon3(error) => return Err(error),
+                crate::Error::Probe(error) => return Err(error.into()),
+                _other => unreachable!(),
+            },
+        }
+    }
+
+    fn read_deferred_result(
+        &mut self,
+        index: DeferredResultIndex,
+    ) -> Result<CommandResult, Leon3Error> {
+        match self.state.jtag_results.take(index) {
+            Ok(result) => Ok(result),
+            Err(index) => {
+                self.execute()?;
+                // We can lose data if `execute` fails.
+                self.state
+                    .jtag_results
+                    .take(index)
+                    .map_err(|_| AhbJtagError::BatchedResultNotAvailable)
+                    .map_err(Leon3Error::AhbJtag)
             }
         }
     }
 
-    fn transform_ddata_result(&self, response_bits: &BitSlice) -> TransactionOutcome {
-        // TODO(darsor): first write transfer response always returns seq=0, which is not handled,
-        //   so disable that logic for now
-        const CHECK_AHB_FINISHED: bool = false;
+    fn get_transform<T: Into<JtagCommand>>(
+        transaction: &TransactionState,
+    ) -> fn(&T, &BitSlice) -> Result<CommandResult, crate::Error> {
+        match transaction.kind {
+            TransactionKind::Read => match transaction.size {
+                TransactionSize::U8 => match transaction.address % 4 {
+                    0 => Self::transform_read_ddata_8_offset_0,
+                    1 => Self::transform_read_ddata_8_offset_1,
+                    2 => Self::transform_read_ddata_8_offset_2,
+                    3 => Self::transform_read_ddata_8_offset_3,
+                    _ => unreachable!(),
+                },
+                TransactionSize::U16 => match transaction.address % 4 {
+                    0 => Self::transform_read_ddata_16_offset_0,
+                    2 => Self::transform_read_ddata_16_offset_2,
+                    _ => unreachable!("U16 transaction should be U16 aligned"),
+                },
+                TransactionSize::U32 => Self::transform_read_ddata_32,
+            },
+            TransactionKind::Write => match transaction.first_access {
+                true => Self::transform_first_write_ddata,
+                false => Self::transform_seq_write_ddata,
+            },
+        }
+    }
+
+    fn transform_first_write_ddata(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        // seq is always 0 for first write, can't fail
+        Ok(CommandResult::None)
+    }
+
+    fn transform_seq_write_ddata(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::None)
+    }
+
+    fn transform_read_ddata_32(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U32(response_bits[0..32].load_le()))
+    }
+
+    fn transform_read_ddata_16_offset_0(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U16(response_bits[16..32].load_le()))
+    }
+
+    fn transform_read_ddata_16_offset_2(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U16(response_bits[0..16].load_le()))
+    }
+
+    fn transform_read_ddata_8_offset_0(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U8(response_bits[24..32].load_le()))
+    }
+
+    fn transform_read_ddata_8_offset_1(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U8(response_bits[16..24].load_le()))
+    }
+
+    fn transform_read_ddata_8_offset_2(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U8(response_bits[8..16].load_le()))
+    }
+
+    fn transform_read_ddata_8_offset_3(
+        _command: &impl Into<JtagCommand>,
+        response_bits: &BitSlice,
+    ) -> Result<CommandResult, crate::Error> {
+        Self::check_seq(response_bits)?;
+        Ok(CommandResult::U8(response_bits[0..8].load_le()))
+    }
+
+    fn check_seq(response_bits: &BitSlice) -> Result<(), crate::Error> {
         let seq = response_bits
             .get(32)
             .expect("AHBJTAG DDATA reponses should 33 bits");
-        if CHECK_AHB_FINISHED && !seq {
+
+        if !seq {
             // transfer not yet complete
-            return TransactionOutcome::Pending;
-        }
-
-        let Some(transaction) = &self.state.current_transaction else {
-            unreachable!("DDATA accessed before writing ADATA");
-        };
-
-        match transaction.kind {
-            TransactionKind::Read => TransactionOutcome::ReadDone(match transaction.size {
-                TransactionSize::U32 => TransactionData::U32(response_bits[0..32].load_le()),
-                TransactionSize::U16 => {
-                    let bit_range = match transaction.address % 4 {
-                        0 => 16..32,
-                        2 => 0..16,
-                        _ => unreachable!("Address should be U16 aligned"),
-                    };
-                    TransactionData::U16(response_bits[bit_range].load_le())
-                }
-                TransactionSize::U8 => {
-                    let bit_range = match transaction.address % 4 {
-                        0 => 24..32,
-                        1 => 16..24,
-                        2 => 8..16,
-                        3 => 0..8,
-                        _ => unreachable!(),
-                    };
-                    TransactionData::U8(response_bits[bit_range].load_le())
-                }
-            }),
-            TransactionKind::Write => TransactionOutcome::WriteDone,
+            Err(Leon3Error::AhbJtag(AhbJtagError::TransactionNotFinished).into())
+        } else {
+            Ok(())
         }
     }
 
@@ -345,13 +415,10 @@ impl AhbJtag {
     /// The address must be aligned to 4 bytes. The SEQ flag is used for efficient
     /// sequential reads. The timeout is for a single word transaction, not the
     /// full read.
-    fn read32_with_timeout(
-        &mut self,
-        address: u32,
-        data: &mut [u32],
-        timeout: Duration,
-    ) -> Result<(), Leon3Error> {
+    fn read32(&mut self, address: u32, data: &mut [u32]) -> Result<(), Leon3Error> {
         check_out_of_bounds(address, data.len() * 4)?;
+        let mut results = Vec::with_capacity(1024 / 4);
+        let max_address = 4 * (data.len()) as u32;
 
         // Sequential transfers should not cross a 1 kB boundary.
         // Process transfers in chunks within 1024-byte boundaries
@@ -360,17 +427,25 @@ impl AhbJtag {
             .enumerate()
             .chunk_by(|(word_idx, _)| (address + *word_idx as u32 * 4) / 1024)
         {
-            // write ADATA once for the chunk
             let start_address = std::cmp::max(address, chunk_idx * 1024);
-            self.write_adata(start_address, TransactionKind::Read, TransactionSize::U32)?;
+            let end_address = std::cmp::min((chunk_idx + 1) * 1024, max_address);
 
-            // read DDATA for each word in the chunk
-            for (position, (_idx, word)) in chunk.with_position() {
+            // schedule write ADATA once for the chunk
+            self.schedule_write_adata(start_address, TransactionKind::Read, TransactionSize::U32);
+
+            // schedule read DDATA for each word in the chunk
+            let num_transactions = (end_address - start_address) / 4;
+            for (position, _) in (0..num_transactions).with_position() {
                 let seq = match position {
                     Position::First | Position::Middle => Seq::ContinuingTransaction,
                     Position::Last | Position::Only => Seq::LastTransaction,
                 };
-                *word = self.read_ddata_with_timeout(seq, timeout)?.as_u32();
+                results.push(self.schedule_read_ddata(seq));
+            }
+
+            // execute and get the results
+            for (result, (_, data)) in iter::zip(results.drain(..), chunk) {
+                *data = self.read_deferred_result(result)?.into_u32();
             }
         }
         Ok(())
@@ -379,30 +454,25 @@ impl AhbJtag {
     /// Read a single 16-bit word from the target at the given address.
     ///
     /// The address must be aligned to 2 bytes.
-    fn read16_with_timeout(&mut self, address: u32, timeout: Duration) -> Result<u16, Leon3Error> {
-        self.write_adata(address, TransactionKind::Read, TransactionSize::U16)?;
-        self.read_ddata_with_timeout(Seq::LastTransaction, timeout)
-            .map(|data| data.as_u16())
+    fn read16(&mut self, address: u32) -> Result<u16, Leon3Error> {
+        self.schedule_write_adata(address, TransactionKind::Read, TransactionSize::U16);
+        let result = self.schedule_read_ddata(Seq::LastTransaction);
+        self.read_deferred_result(result)
+            .map(|data| data.into_u16())
     }
 
     /// Read a single byte from the target at the given address.
-    fn read8_with_timeout(&mut self, address: u32, timeout: Duration) -> Result<u8, Leon3Error> {
-        self.write_adata(address, TransactionKind::Read, TransactionSize::U8)?;
-        self.read_ddata_with_timeout(Seq::LastTransaction, timeout)
-            .map(|data| data.as_u8())
+    fn read8(&mut self, address: u32) -> Result<u8, Leon3Error> {
+        self.schedule_write_adata(address, TransactionKind::Read, TransactionSize::U8);
+        let result = self.schedule_read_ddata(Seq::LastTransaction);
+        self.read_deferred_result(result).map(|data| data.into_u8())
     }
 
     /// Write a series of 32-bit words to the target at the given address.
     ///
     /// The address must be aligned to 4 bytes. The SEQ flag is used for efficient
-    /// sequential writes. The timeout is for a single word transaction, not the
-    /// full read.
-    fn write32_with_timeout(
-        &mut self,
-        address: u32,
-        data: &[u32],
-        timeout: Duration,
-    ) -> Result<(), Leon3Error> {
+    /// sequential writes.
+    fn write32(&mut self, address: u32, data: &[u32]) -> Result<(), Leon3Error> {
         check_out_of_bounds(address, data.len() * 4)?;
 
         // Sequential transfers should not cross a 1 kB boundary.
@@ -412,18 +482,19 @@ impl AhbJtag {
             .enumerate()
             .chunk_by(|(word_idx, _)| (address + *word_idx as u32 * 4) / 1024)
         {
-            // write ADATA once for the chunk
+            // schedule write ADATA once for the chunk
             let start_address = std::cmp::max(address, chunk_idx * 1024);
-            self.write_adata(start_address, TransactionKind::Write, TransactionSize::U32)?;
+            self.schedule_write_adata(start_address, TransactionKind::Write, TransactionSize::U32);
 
-            // write DDATA for each word in the chunk
+            // schedule write DDATA for each word in the chunk
             for (position, (_idx, word)) in chunk.with_position() {
                 let seq = match position {
                     Position::First | Position::Middle => Seq::ContinuingTransaction,
                     Position::Last | Position::Only => Seq::LastTransaction,
                 };
-                self.write_ddata_with_timeout(TransactionData::U32(*word), seq, timeout)?;
+                self.schedule_write_ddata(TransactionData::U32(*word), seq);
             }
+            self.execute()?;
         }
         Ok(())
     }
@@ -431,25 +502,17 @@ impl AhbJtag {
     /// Write a single 16-bit word to the target at the given address.
     ///
     /// The address must be aligned to 2 bytes.
-    fn write16_with_timeout(
-        &mut self,
-        address: u32,
-        data: u16,
-        timeout: Duration,
-    ) -> Result<(), Leon3Error> {
-        self.write_adata(address, TransactionKind::Write, TransactionSize::U16)?;
-        self.write_ddata_with_timeout(TransactionData::U16(data), Seq::LastTransaction, timeout)
+    fn write16(&mut self, address: u32, data: u16) -> Result<(), Leon3Error> {
+        self.schedule_write_adata(address, TransactionKind::Write, TransactionSize::U16);
+        self.schedule_write_ddata(TransactionData::U16(data), Seq::LastTransaction);
+        self.execute()
     }
 
     /// Write a single byte to the target at the given address.
-    fn write8_with_timeout(
-        &mut self,
-        address: u32,
-        data: u8,
-        timeout: Duration,
-    ) -> Result<(), Leon3Error> {
-        self.write_adata(address, TransactionKind::Write, TransactionSize::U8)?;
-        self.write_ddata_with_timeout(TransactionData::U8(data), Seq::LastTransaction, timeout)
+    fn write8(&mut self, address: u32, data: u8) -> Result<(), Leon3Error> {
+        self.schedule_write_adata(address, TransactionKind::Write, TransactionSize::U8);
+        self.schedule_write_ddata(TransactionData::U8(data), Seq::LastTransaction);
+        self.execute()
     }
 }
 
@@ -489,7 +552,7 @@ impl MemoryInterface for AhbJtag {
         assert_eq!(prefix.len(), 0);
         assert_eq!(suffix.len(), 0);
 
-        self.read32_with_timeout(address, data32, JTAG_TIMEOUT)?;
+        self.read32(address, data32)?;
 
         // For a big-endian host, data[0] has
         //   host address offset:  0   1   2   3   4   5   6   7
@@ -514,7 +577,7 @@ impl MemoryInterface for AhbJtag {
     fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), crate::Error> {
         check_alignment(address, 4)?;
         let address = valid_32bit_address(address)?;
-        self.read32_with_timeout(address, data, JTAG_TIMEOUT)?;
+        self.read32(address, data)?;
         Ok(())
     }
 
@@ -523,7 +586,7 @@ impl MemoryInterface for AhbJtag {
         let address = valid_32bit_address(address)?;
         check_out_of_bounds(address, data.len() * 2)?;
         for (word_idx, word16) in data.iter_mut().enumerate() {
-            *word16 = self.read16_with_timeout(address + 2 * word_idx as u32, JTAG_TIMEOUT)?;
+            *word16 = self.read16(address + 2 * word_idx as u32)?;
         }
         Ok(())
     }
@@ -532,7 +595,7 @@ impl MemoryInterface for AhbJtag {
         let address = valid_32bit_address(address)?;
         check_out_of_bounds(address, data.len())?;
         for (byte_idx, byte) in data.iter_mut().enumerate() {
-            *byte = self.read8_with_timeout(address + byte_idx as u32, JTAG_TIMEOUT)?;
+            *byte = self.read8(address + byte_idx as u32)?;
         }
         Ok(())
     }
@@ -546,7 +609,7 @@ impl MemoryInterface for AhbJtag {
         assert_eq!(suffix.len(), 0);
         #[cfg(target_endian = "big")]
         {
-            self.write32_with_timeout(address, words32, JTAG_TIMEOUT)?;
+            self.write32(address, words32)?;
         }
         #[cfg(target_endian = "little")]
         {
@@ -557,7 +620,7 @@ impl MemoryInterface for AhbJtag {
                 buffer32_pair[0] = word32_pair[1];
                 buffer32_pair[1] = word32_pair[0];
             }
-            self.write32_with_timeout(address, &buffer, JTAG_TIMEOUT)?;
+            self.write32(address, &buffer)?;
         }
         Ok(())
     }
@@ -565,7 +628,7 @@ impl MemoryInterface for AhbJtag {
     fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), crate::Error> {
         check_alignment(address, 4)?;
         let address = valid_32bit_address(address)?;
-        self.write32_with_timeout(address, data, JTAG_TIMEOUT)?;
+        self.write32(address, data)?;
         Ok(())
     }
 
@@ -574,7 +637,7 @@ impl MemoryInterface for AhbJtag {
         let address = valid_32bit_address(address)?;
         check_out_of_bounds(address, data.len() * 2)?;
         for (word_idx, word16) in data.iter().enumerate() {
-            self.write16_with_timeout(address + 2 * word_idx as u32, *word16, JTAG_TIMEOUT)?;
+            self.write16(address + 2 * word_idx as u32, *word16)?;
         }
         Ok(())
     }
@@ -583,7 +646,7 @@ impl MemoryInterface for AhbJtag {
         let address = valid_32bit_address(address)?;
         check_out_of_bounds(address, data.len())?;
         for (byte_idx, byte) in data.iter().enumerate() {
-            self.write8_with_timeout(address + byte_idx as u32, *byte, JTAG_TIMEOUT)?;
+            self.write8(address + byte_idx as u32, *byte)?;
         }
         Ok(())
     }

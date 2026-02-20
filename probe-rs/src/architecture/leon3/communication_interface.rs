@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crate::{
     CoreInformation, Error as ProbeRsError, MemoryInterface, MemoryMappedRegister, RegisterId,
     architecture::leon3::{
+        ahbjtag::AhbJtagError,
         dsu3::{Dsu3, Dsu3State, DsuCtrl, DsuRegister, Psr},
         plugnplay::{Device, GaislerDevice, PlugnPlayState},
         registers::Leon3RegisterId,
@@ -43,6 +44,9 @@ pub enum Leon3Error {
     /// Breakpoint operation requested on invalid breakpoint
     #[error("Breakpoint {0} out of range (must be 0-4)")]
     BreakpointOutOfRange(usize),
+    /// Error in AHBJTAG acces
+    #[error("AHBJTAG access error")]
+    AhbJtag(#[source] AhbJtagError),
     /// Some uncategorized LEON3 error occurred.
     #[error("{0}")]
     Other(&'static str),
