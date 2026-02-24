@@ -51,7 +51,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
     /// Core should be already `reset_and_halt`ed right before this call.
     fn prepare_running_on_ram(
         &self,
-        vector_table_addr: u64,
+        reset_addr: u64,
         session: &mut Session,
     ) -> Result<(), crate::Error> {
         tracing::info!("Performing RAM flash start");
@@ -62,6 +62,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
             ));
         }
 
+        tracing::debug!("Reset address: 0x{reset_addr:08X}");
         // FIXME: currently defaulting stack pointer to end of RAM region
         // we're flashing into. Is there a better heuristic? Or at least
         // make configurable.
@@ -69,7 +70,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
             .target()
             .memory_map
             .iter()
-            .find(|&region| region.is_ram() && region.contains(vector_table_addr))
+            .find(|&region| region.is_ram() && region.contains(reset_addr))
         else {
             return Err(crate::Error::Other(
                 "RAM flash region not included in target definition".to_string(),
@@ -80,9 +81,11 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
 
         tracing::debug!("RAM flash start for LEON3 single core target");
         let mut core = session.core(0)?;
-        core.write_core_reg(PC.id, vector_table_addr as u32)?;
-        core.write_core_reg(NPC.id, vector_table_addr as u32 + 4)?;
-        core.write_core_reg(TBR.id, vector_table_addr as u32)?;
+
+        core.write_core_reg(PC.id, reset_addr as u32)?;
+        core.write_core_reg(NPC.id, reset_addr as u32 + 4)?;
+        core.write_core_reg(TBR.id, reset_addr as u32)?;
+        tracing::info!("Setting stack pointer to 0x{stack_pointer:08X}");
         core.write_core_reg(SP.id, stack_pointer)
     }
 

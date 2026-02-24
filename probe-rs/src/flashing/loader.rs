@@ -95,6 +95,7 @@ impl ImageLoader for ElfLoader {
         file: &mut dyn ImageReader,
     ) -> Result<(), FileDownloadError> {
         const VECTOR_TABLE_SECTION_NAME: &str = ".vector_table";
+        const TEXT_SECTION_NAME: &str = ".text";
         let mut elf_buffer = Vec::new();
         file.read_to_end(&mut elf_buffer)?;
 
@@ -108,6 +109,11 @@ impl ImageLoader for ElfLoader {
 
         tracing::info!("Found {} loadable sections:", extracted_data.len());
 
+        let vector_table_section_name = match session.architecture() {
+            probe_rs_target::Architecture::Sparc => TEXT_SECTION_NAME,
+            _ => VECTOR_TABLE_SECTION_NAME,
+        };
+
         for section in &extracted_data {
             let source = match section.section_names.len() {
                 0 => "Unknown",
@@ -115,7 +121,11 @@ impl ImageLoader for ElfLoader {
                 _ => "Multiple sections",
             };
 
-            if source == VECTOR_TABLE_SECTION_NAME {
+            if section
+                .section_names
+                .iter()
+                .any(|name| name == vector_table_section_name)
+            {
                 flash_loader.set_vector_table_addr(section.address as _);
             }
 

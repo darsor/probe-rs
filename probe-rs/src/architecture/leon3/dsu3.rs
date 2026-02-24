@@ -418,7 +418,6 @@ impl Default for Psr {
     // reset value
     fn default() -> Self {
         let mut this = Self::from(0);
-        this.set_et(true);
         this.set_ps(true);
         this.set_s(true);
         this

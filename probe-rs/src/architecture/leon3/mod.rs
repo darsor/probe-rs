@@ -138,7 +138,11 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn run(&mut self) -> Result<(), crate::Error> {
-        let dsu_ctrl: DsuCtrl = self.interface.read_dsu_reg()?;
+        let dsu_ctrl = self.interface.modify_dsu_reg(|ctrl: &mut DsuCtrl| {
+            ctrl.set_be(true);
+            ctrl.set_bz(true);
+            *ctrl
+        })?;
         // TODO(darsor): better error types
         if dsu_ctrl.pe() || dsu_ctrl.hl() {
             return Err(Leon3Error::Other("core is in error mode"))?;
@@ -162,7 +166,7 @@ impl<'state> CoreInterface for Leon3<'state> {
         _timeout: Duration,
     ) -> Result<crate::CoreInformation, crate::Error> {
         if !self.interface.core_in_debug_mode()? {
-            return Err(Leon3Error::Other("Core must be in debug mode to reset"))?;
+            self.halt(Duration::from_millis(500))?;
         }
         // reset all peripherals
         for peripheral in self.interface.peripherals.clone() {
@@ -324,7 +328,7 @@ impl<'state> CoreInterface for Leon3<'state> {
     }
 
     fn debug_core_stop(&mut self) -> Result<(), crate::Error> {
-        todo!()
+        Ok(())
     }
 }
 
