@@ -257,6 +257,8 @@ impl AhbJtag {
             .try_as_jtag_probe()
             .expect("Should be JTAG probe");
 
+        // TODO: handle automatically
+        probe.set_idle_cycles(4)?;
         let cmds = std::mem::take(&mut self.state.queued_commands);
 
         match probe.write_register_batch(&cmds) {
@@ -408,7 +410,7 @@ impl AhbJtag {
     fn read32(&mut self, address: u32, data: &mut [u32]) -> Result<(), AhbJtagError> {
         check_out_of_bounds(address as u64, data.len() * 4)?;
         let mut results = Vec::with_capacity(1024 / 4);
-        let max_address = 4 * (data.len()) as u32;
+        let max_address = address + 4 * (data.len()) as u32;
 
         // Sequential transfers should not cross a 1 kB boundary.
         // Process transfers in chunks within 1024-byte boundaries
