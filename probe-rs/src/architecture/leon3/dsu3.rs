@@ -29,7 +29,7 @@ impl<'state> Dsu3<'state> {
         if core_index >= 16 {
             return Err(Leon3Error::CoreOutOfRange { core_index });
         }
-        Ok(self.state.base_addr + (core_index as u64) << 24)
+        Ok(self.state.base_addr + ((core_index as u64) << 24))
     }
 
     /// Get the address of a register with the core offset included.
