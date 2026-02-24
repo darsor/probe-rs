@@ -247,7 +247,7 @@ pub(crate) fn scan_plugnplay(mem: &mut dyn MemoryInterface) -> Result<Vec<Record
         devices.extend(apb);
     }
 
-    tracing::info!("Plug&Play scan complete: {devices:#?}");
+    tracing::info!("Plug&Play scan complete: {devices:#X?}");
     Ok(devices)
 }
 
