@@ -204,7 +204,9 @@ impl<'state> CoreInterface for Leon3<'state> {
             .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::NPC), 4)?;
         self.interface
             .write_core_reg(Leon3RegisterId::IuSpecial(IuSpecialReg::FSR), 0)?;
-        // TODO DSU: flush caches
+        // flush data/instruction cache
+        self.interface.flush_caches()?;
+
         self.interface.core_info()
     }
 

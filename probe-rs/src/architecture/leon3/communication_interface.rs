@@ -228,6 +228,10 @@ impl<'state> Leon3CommunicationInterface<'state> {
 
         Ok(CoreInformation { pc: pc.into() })
     }
+
+    pub(crate) fn flush_caches(&mut self) -> Result<(), crate::Error> {
+        self.dsu.flush_caches(self.probe, self.core_index)
+    }
 }
 
 /// The combined state of a LEON3's DSU3 debug module and its transport interface.

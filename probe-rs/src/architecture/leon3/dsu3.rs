@@ -181,6 +181,21 @@ impl<'state> Dsu3<'state> {
         let addr = u64::from(asr24.waddr() << 2);
         Ok(enabled.then_some(addr))
     }
+
+    pub(crate) fn flush_caches(
+        &self,
+        ahb: &mut dyn MemoryInterface,
+        core_index: usize,
+    ) -> Result<(), crate::Error> {
+        let base = self.base_address(core_index)?;
+        ahb.write_word_32(base + 0x40_0024, 0x2)?; // select ASI 2
+        // cache control register
+        let mut cache_ctrl = ahb.read_word_32(base + 0x70_0000)?;
+        cache_ctrl |= 1 << 21; // flush instruction cache
+        cache_ctrl |= 1 << 22; // flush data cache
+        ahb.write_word_32(base + 0x70_0000, cache_ctrl)?;
+        Ok(())
+    }
 }
 
 /// State of the DSU3 (not for any specific core).
