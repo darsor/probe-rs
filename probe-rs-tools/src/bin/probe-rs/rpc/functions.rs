@@ -17,7 +17,7 @@ use crate::{
                 BuildRequest, BuildResponse, EraseRequest, FlashRequest, ProgressEvent,
                 VerifyRequest, VerifyResponse, build, erase, flash, verify,
             },
-            info::{InfoEvent, TargetInfoRequest, target_info},
+            info::{InfoEvent, TargetInfoRequest, TargetNameRequest, target_info, target_name},
             memory::{ReadMemoryRequest, WriteMemoryRequest, read_memory, write_memory},
             monitor::{MonitorRequest, MonitorResponse, RttEvent, SemihostingEvent, monitor},
             probe::{
@@ -26,7 +26,10 @@ use crate::{
             },
             reset::{ResetCoreAndHaltRequest, ResetCoreRequest, reset, reset_and_halt},
             resume::{ResumeAllCoresRequest, resume_all_cores},
-            rtt_client::{CreateRttClientRequest, CreateRttClientResponse, create_rtt_client},
+            rtt_client::{
+                CreateRttClientRequest, CreateRttClientResponse, RttDownRequest, create_rtt_client,
+                write_rtt_down,
+            },
             stack_trace::{TakeStackTraceRequest, TakeStackTraceResponse, take_stack_trace},
             test::{
                 ListTestsRequest, ListTestsResponse, RunTestRequest, RunTestResponse, list_tests,
@@ -443,6 +446,8 @@ pub fn spawn_fn(
     Ok(())
 }
 
+type TargetNameResponse = RpcResult<String>;
+
 type ReadMemory8Response = RpcResult<Vec<u8>>;
 type ReadMemory16Response = RpcResult<Vec<u16>>;
 type ReadMemory32Response = RpcResult<Vec<u32>>;
@@ -463,6 +468,7 @@ endpoints! {
 
     | ResumeAllCoresEndpoint    | ResumeAllCoresRequest   | NoResponse              | "resume"           |
     | CreateRttClientEndpoint   | CreateRttClientRequest  | CreateRttClientResponse | "create_rtt"       |
+    | RttDownEndpoint           | RttDownRequest          | NoResponse              | "rtt/down"         |
     | TakeStackTraceEndpoint    | TakeStackTraceRequest   | TakeStackTraceResponse  | "stack_trace"      |
     | BuildEndpoint             | BuildRequest            | BuildResponse           | "flash/build"      |
     | FlashEndpoint             | FlashRequest            | NoResponse              | "flash/flash"      |
@@ -480,6 +486,7 @@ endpoints! {
     | ChipInfoEndpoint          | ChipInfoRequest         | ChipInfoResponse        | "chips/info"       |
     | LoadChipFamilyEndpoint    | LoadChipFamilyRequest   | NoResponse              | "chips/load"       |
 
+    | TargetNameEndpoint        | TargetNameRequest       | TargetNameResponse      | "target"      |
     | TargetInfoEndpoint        | TargetInfoRequest       | NoResponse              | "info"             |
     | ResetCoreEndpoint         | ResetCoreRequest        | NoResponse              | "reset"            |
     | ResetCoreAndHaltEndpoint  | ResetCoreAndHaltRequest | NoResponse              | "reset_and_halt"   |
@@ -538,6 +545,7 @@ postcard_rpc::define_dispatch! {
         | EraseEndpoint             | async     | erase             |
         | VerifyEndpoint            | async     | verify            |
         | MonitorEndpoint           | spawn     | monitor           |
+        | RttDownEndpoint           | async     | write_rtt_down    |
 
         | ListTestsEndpoint         | spawn     | list_tests        |
         | RunTestEndpoint           | spawn     | run_test          |
@@ -549,6 +557,7 @@ postcard_rpc::define_dispatch! {
         | ChipInfoEndpoint          | async     | chip_info         |
         | LoadChipFamilyEndpoint    | async     | load_chip_family  |
 
+        | TargetNameEndpoint        | async     | target_name       |
         | TargetInfoEndpoint        | async     | target_info       |
         | ResetCoreEndpoint         | async     | reset             |
         | ResetCoreAndHaltEndpoint  | async     | reset_and_halt    |

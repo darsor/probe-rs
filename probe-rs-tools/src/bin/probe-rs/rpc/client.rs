@@ -36,17 +36,18 @@ use crate::{
             ListProbesEndpoint, ListTestsEndpoint, LoadChipFamilyEndpoint, MonitorEndpoint,
             ProgressEventTopic, ReadMemory8Endpoint, ReadMemory16Endpoint, ReadMemory32Endpoint,
             ReadMemory64Endpoint, ResetCoreAndHaltEndpoint, ResetCoreEndpoint,
-            ResumeAllCoresEndpoint, RpcResult, RunTestEndpoint, SelectProbeEndpoint,
-            TakeStackTraceEndpoint, TargetInfoDataTopic, TargetInfoEndpoint, TempFileDataEndpoint,
-            TokioSpawner, VerifyEndpoint, WriteMemory8Endpoint, WriteMemory16Endpoint,
-            WriteMemory32Endpoint, WriteMemory64Endpoint,
+            ResumeAllCoresEndpoint, RpcResult, RttDownEndpoint, RunTestEndpoint,
+            SelectProbeEndpoint, TakeStackTraceEndpoint, TargetInfoDataTopic, TargetInfoEndpoint,
+            TargetNameEndpoint, TempFileDataEndpoint, TokioSpawner, VerifyEndpoint,
+            WriteMemory8Endpoint, WriteMemory16Endpoint, WriteMemory32Endpoint,
+            WriteMemory64Endpoint,
             chip::{ChipData, ChipFamily, ChipInfoRequest, LoadChipFamilyRequest},
             file::{AppendFileRequest, TempFile},
             flash::{
                 BootInfo, BuildRequest, BuildResult, DownloadOptions, EraseCommand, EraseRequest,
                 FlashRequest, ProgressEvent, VerifyRequest, VerifyResult,
             },
-            info::{InfoEvent, TargetInfoRequest},
+            info::{InfoEvent, TargetInfoRequest, TargetNameRequest},
             memory::{ReadMemoryRequest, WriteMemoryRequest},
             monitor::{MonitorExitReason, MonitorMode, MonitorOptions, MonitorRequest},
             probe::{
@@ -55,7 +56,7 @@ use crate::{
             },
             reset::{ResetCoreAndHaltRequest, ResetCoreRequest},
             resume::ResumeAllCoresRequest,
-            rtt_client::{CreateRttClientRequest, RttClientData, ScanRegion},
+            rtt_client::{CreateRttClientRequest, RttClientData, RttDownRequest, ScanRegion},
             stack_trace::{StackTraces, TakeStackTraceRequest},
             test::{ListTestsRequest, RunTestRequest, Test, TestResult, Tests},
         },
@@ -82,6 +83,13 @@ pub async fn connect(host: &str, token: Option<String>) -> anyhow::Result<RpcCli
         tungstenite::{ClientRequestBuilder, Message},
     };
     use tokio_util::bytes::Bytes;
+
+    #[cfg(unix)]
+    if let Some(path) = host.strip_prefix("socket://") {
+        tracing::debug!("Socket path detected, will connect via Unix socket.");
+
+        return connect_unix(path).await;
+    }
 
     let uri = Uri::from_str(&format!("{host}/worker")).context("Failed to parse server URI")?;
 
@@ -142,6 +150,24 @@ pub async fn connect(host: &str, token: Option<String>) -> anyhow::Result<RpcCli
             })
         })),
     ))
+}
+
+#[cfg(all(feature = "remote", unix))]
+pub async fn connect_unix(path: &str) -> anyhow::Result<RpcClient> {
+    use crate::rpc::transport::unix::{UnixStreamRx, UnixStreamTx};
+    use anyhow::Context;
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(path)
+        .await
+        .context("Failed to connect to Unix socket")?;
+
+    let (reader, writer) = stream.into_split();
+
+    let tx = UnixStreamTx::new(writer);
+    let rx = UnixStreamRx::new(reader);
+
+    Ok(RpcClient::new_from_wire(tx, rx))
 }
 
 #[cfg(feature = "remote")]
@@ -426,6 +452,14 @@ impl SessionInterface {
         self.client.clone()
     }
 
+    pub async fn target_name(&self) -> anyhow::Result<String> {
+        self.client
+            .send_resp::<TargetNameEndpoint, _>(&TargetNameRequest {
+                sessid: self.sessid,
+            })
+            .await
+    }
+
     pub fn core(&self, core: usize) -> CoreInterface {
         CoreInterface {
             sessid: self.sessid,
@@ -536,6 +570,22 @@ impl SessionInterface {
             .await
     }
 
+    pub async fn send_to_rtt(
+        &self,
+        rtt_client: Key<RttClient>,
+        channel: u32,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.client
+            .send_resp::<RttDownEndpoint, _>(&RttDownRequest {
+                sessid: self.sessid,
+                rtt_client,
+                channel,
+                data,
+            })
+            .await
+    }
+
     pub async fn list_tests(
         &self,
         boot_info: BootInfo,
@@ -580,12 +630,14 @@ impl SessionInterface {
         &self,
         scan_regions: ScanRegion,
         config: Vec<RttChannelConfig>,
+        default_config: RttChannelConfig,
     ) -> anyhow::Result<RttClientData> {
         self.client
             .send_resp::<CreateRttClientEndpoint, _>(&CreateRttClientRequest {
                 sessid: self.sessid,
                 scan_regions,
                 config,
+                default_config,
             })
             .await
     }

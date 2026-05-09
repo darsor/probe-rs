@@ -5,13 +5,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use probe_rs::{Core, Error, HaltReason, VectorCatchCondition};
+use probe_rs::{Core, CoreType, Error, HaltReason, VectorCatchCondition};
 
-use crate::rpc::SessionState;
+use crate::rpc::{ObjectStorage, SessionState};
 
 pub struct RunLoop {
     pub core_id: usize,
     pub cancellation_token: CancellationToken,
+}
+
+/// Configuration for which vector catches to enable during the run loop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VectorCatchConfig {
+    pub catch_hardfault: bool,
+    pub catch_reset: bool,
+    pub catch_svc: bool,
+    pub catch_hlt: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -38,8 +47,7 @@ impl RunLoop {
     pub fn run_until<F, R>(
         &mut self,
         shared_session: &SessionState<'_>,
-        catch_hardfault: bool,
-        catch_reset: bool,
+        vector_catch: VectorCatchConfig,
         mut poller: impl RunLoopPoller,
         timeout: Option<Duration>,
         mut predicate: F,
@@ -47,30 +55,63 @@ impl RunLoop {
     where
         F: FnMut(HaltReason, &mut Core) -> Result<Option<R>>,
     {
+        let VectorCatchConfig {
+            catch_hardfault,
+            catch_reset,
+            catch_svc,
+            catch_hlt,
+        } = vector_catch;
+
         // Prepare run loop
         {
             let mut session = shared_session.session_blocking();
             let mut core = session.core(self.core_id)?;
-            if catch_hardfault || catch_reset {
+            let needs_vector_catch = catch_hardfault || catch_reset || catch_svc || catch_hlt;
+
+            if needs_vector_catch {
                 if !core.core_halted()? {
                     core.halt(Duration::from_millis(100))?;
                 }
 
-                if catch_hardfault {
-                    match core.enable_vector_catch(VectorCatchCondition::HardFault) {
-                        Ok(_) | Err(Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
-                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+                // For ARMv7-A/R and ARMv8-A cores: if we're at the reset vector (PC = 0), step
+                // past it first. This happens after reset_and_halt - enabling the reset catch
+                // while at the reset vector causes an immediate halt.
+                if catch_reset
+                    && matches!(
+                        core.core_type(),
+                        CoreType::Armv7a | CoreType::Armv7r | CoreType::Armv8a
+                    )
+                {
+                    let pc: u64 = core.read_core_reg(core.program_counter())?;
+                    if pc == 0 {
+                        core.step()?;
                     }
                 }
-                if catch_reset {
-                    match core.enable_vector_catch(VectorCatchCondition::CoreReset) {
-                        Ok(_) | Err(Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
-                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+
+                let catches = [
+                    (catch_hardfault, VectorCatchCondition::HardFault),
+                    (catch_reset, VectorCatchCondition::CoreReset),
+                    (catch_svc, VectorCatchCondition::Svc),
+                    (catch_hlt, VectorCatchCondition::Hlt),
+                ];
+
+                for (enabled, condition) in catches {
+                    let result = if enabled {
+                        core.enable_vector_catch(condition)
+                    } else {
+                        core.disable_vector_catch(condition)
+                    };
+                    match result {
+                        Ok(_) | Err(Error::NotImplemented(_)) => {}
+                        Err(e) => {
+                            tracing::error!("Failed to set vector catch {:?}: {:?}", condition, e)
+                        }
                     }
                 }
             }
 
-            poller.start(&mut core)?;
+            let object_storage = shared_session.object_storage();
+            poller.start(&object_storage, &mut core)?;
 
             if core.core_halted()? {
                 core.run()?;
@@ -82,8 +123,9 @@ impl RunLoop {
         // Clean up run loop
         let mut session = shared_session.session_blocking();
         let mut core = session.core(self.core_id)?;
+        let object_storage = shared_session.object_storage();
         // Always clean up after RTT but don't overwrite the original result.
-        let poller_exit_result = poller.exit(&mut core);
+        let poller_exit_result = poller.exit(&object_storage, &mut core);
         if result.is_ok() {
             // If the result is Ok, we return the potential error during cleanup.
             poller_exit_result?;
@@ -135,6 +177,7 @@ impl RunLoop {
         let mut core = session.core(self.core_id)?;
 
         let mut next_poll = Duration::from_millis(100);
+        let object_storage = shared_session.object_storage();
 
         // check for halt first, poll rtt after.
         // this is important so we do one last poll after halt, so we flush all messages
@@ -161,7 +204,7 @@ impl RunLoop {
             probe_rs::CoreStatus::LockedUp => Some(Ok(ReturnReason::LockedUp)),
         };
 
-        let poller_result = poller.poll(&mut core);
+        let poller_result = poller.poll(&object_storage, &mut core);
 
         if let Some(reason) = return_reason {
             return reason.map(ControlFlow::Break);
@@ -179,23 +222,23 @@ impl RunLoop {
 }
 
 pub trait RunLoopPoller {
-    fn start(&mut self, core: &mut Core<'_>) -> Result<()>;
-    fn poll(&mut self, core: &mut Core<'_>) -> Result<Duration>;
-    fn exit(&mut self, core: &mut Core<'_>) -> Result<()>;
+    fn start(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<()>;
+    fn poll(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<Duration>;
+    fn exit(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<()>;
 }
 
 pub struct NoopPoller;
 
 impl RunLoopPoller for NoopPoller {
-    fn start(&mut self, _core: &mut Core<'_>) -> Result<()> {
+    fn start(&mut self, _: &ObjectStorage, _core: &mut Core<'_>) -> Result<()> {
         Ok(())
     }
 
-    fn poll(&mut self, _core: &mut Core<'_>) -> Result<Duration> {
+    fn poll(&mut self, _: &ObjectStorage, _core: &mut Core<'_>) -> Result<Duration> {
         Ok(Duration::from_secs(u64::MAX))
     }
 
-    fn exit(&mut self, _core: &mut Core<'_>) -> Result<()> {
+    fn exit(&mut self, _: &ObjectStorage, _core: &mut Core<'_>) -> Result<()> {
         Ok(())
     }
 }
@@ -204,27 +247,27 @@ impl<T> RunLoopPoller for Option<T>
 where
     T: RunLoopPoller,
 {
-    fn start(&mut self, core: &mut Core<'_>) -> Result<()> {
+    fn start(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<()> {
         if let Some(poller) = self {
-            poller.start(core)
+            poller.start(objs, core)
         } else {
-            NoopPoller.start(core)
+            NoopPoller.start(objs, core)
         }
     }
 
-    fn poll(&mut self, core: &mut Core<'_>) -> Result<Duration> {
+    fn poll(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<Duration> {
         if let Some(poller) = self {
-            poller.poll(core)
+            poller.poll(objs, core)
         } else {
-            NoopPoller.poll(core)
+            NoopPoller.poll(objs, core)
         }
     }
 
-    fn exit(&mut self, core: &mut Core<'_>) -> Result<()> {
+    fn exit(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> Result<()> {
         if let Some(poller) = self {
-            poller.exit(core)
+            poller.exit(objs, core)
         } else {
-            NoopPoller.exit(core)
+            NoopPoller.exit(objs, core)
         }
     }
 }

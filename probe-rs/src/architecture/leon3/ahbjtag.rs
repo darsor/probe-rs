@@ -10,8 +10,9 @@ use crate::{
     MemoryInterface,
     memory::{InvalidDataLengthError, MemoryNotAlignedError},
     probe::{
-        CommandQueue, CommandResult, DebugProbeError, DeferredResultIndex, DeferredResultSet,
-        JtagCommand, JtagWriteCommand, Probe, ShiftDrCommand,
+        CommandResult, DebugProbeError, JtagWriteCommand, JtagWriteData, Probe, ShiftDrCommand,
+        ShiftDrData,
+        queue::{BatchError, DeferredResultIndex, DeferredResultSet, Queue},
     },
 };
 
@@ -52,7 +53,7 @@ pub struct AhbJtag {
 #[derive(Debug)]
 struct AhbJtagState {
     current_transaction: Option<TransactionState>,
-    queued_commands: CommandQueue<JtagCommand>,
+    queued_commands: Queue<crate::Error>,
     jtag_results: DeferredResultSet<CommandResult>,
 }
 
@@ -68,7 +69,7 @@ impl AhbJtagState {
     pub fn new() -> Self {
         Self {
             current_transaction: None,
-            queued_commands: CommandQueue::new(),
+            queued_commands: Queue::new(),
             jtag_results: DeferredResultSet::new(),
         }
     }
@@ -152,6 +153,10 @@ impl TransactionData {
     }
 }
 
+trait JtagData {}
+impl JtagData for JtagWriteData {}
+impl JtagData for ShiftDrData {}
+
 impl AhbJtag {
     /// Construct a new AHBJTAG interface.
     pub fn new(probe: Probe, config: probe_rs_target::AhbJtag) -> Self {
@@ -179,10 +184,12 @@ impl AhbJtag {
         data[4] = (kind.encode() << 2) | size.encode();
         tracing::debug!("Scheduled ADATA: 0x{address:08X} ({kind:?}, {size:?})");
         self.state.queued_commands.schedule(JtagWriteCommand {
-            address: self.config.adata_addr,
-            data,
-            len: ADATA_LEN,
-            transform: |_, _| Ok(CommandResult::None),
+            data: JtagWriteData {
+                address: self.config.adata_addr,
+                data,
+                len: ADATA_LEN,
+            },
+            transform: |_, _| -> Result<CommandResult, crate::Error> { Ok(CommandResult::None) },
         });
     }
 
@@ -229,15 +236,19 @@ impl AhbJtag {
 
         let index = if transaction.first_access {
             self.state.queued_commands.schedule(JtagWriteCommand {
-                address: self.config.ddata_addr,
-                data,
-                len: DDATA_LEN,
+                data: JtagWriteData {
+                    address: self.config.ddata_addr,
+                    data,
+                    len: DDATA_LEN,
+                },
                 transform: Self::get_transform(transaction),
             })
         } else {
             self.state.queued_commands.schedule(ShiftDrCommand {
-                data,
-                len: DDATA_LEN,
+                inner: ShiftDrData {
+                    data,
+                    len: DDATA_LEN,
+                },
                 transform: Self::get_transform(transaction),
             })
         };
@@ -257,21 +268,30 @@ impl AhbJtag {
             .try_as_jtag_probe()
             .expect("Should be JTAG probe");
 
-        // TODO: handle automatically
+        // TODO(darsor): handle automatically
         probe.set_idle_cycles(4)?;
         let cmds = std::mem::take(&mut self.state.queued_commands);
 
-        match probe.write_register_batch(&cmds) {
-            Ok(r) => {
-                self.state.jtag_results.merge_from(r);
-                return Ok(());
+        while !cmds.is_empty() {
+            match cmds.execute(|queue| probe.write_register_batch(queue)) {
+                Ok(r) => {
+                    self.state.jtag_results.merge_from(r);
+                    return Ok(());
+                }
+                Err(e) => match e.error {
+                    BatchError::Specific(error) => match error {
+                        crate::Error::AhbJtag(e) => return Err(e),
+                        crate::Error::Probe(error) => return Err(error.into()),
+                        _other => unreachable!("All error cases should be handled"),
+                    },
+                    BatchError::Probe(debug_probe_error) => {
+                        return Err(debug_probe_error.into());
+                    }
+                },
             }
-            Err(e) => match e.error {
-                crate::Error::AhbJtag(e) => return Err(e),
-                crate::Error::Probe(error) => return Err(error.into()),
-                _other => unreachable!("All error cases should be handled"),
-            },
         }
+
+        Ok(())
     }
 
     fn read_deferred_result(
@@ -291,7 +311,7 @@ impl AhbJtag {
         }
     }
 
-    fn get_transform<T: Into<JtagCommand>>(
+    fn get_transform<T: JtagData>(
         transaction: &TransactionState,
     ) -> fn(&T, &BitSlice) -> Result<CommandResult, crate::Error> {
         match transaction.kind {
@@ -318,7 +338,7 @@ impl AhbJtag {
     }
 
     fn transform_first_write_ddata(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         _response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         // seq is always 0 for first write, can't fail
@@ -326,7 +346,7 @@ impl AhbJtag {
     }
 
     fn transform_seq_write_ddata(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -334,7 +354,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_32(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -342,7 +362,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_16_offset_0(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -350,7 +370,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_16_offset_2(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -358,7 +378,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_8_offset_0(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -366,7 +386,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_8_offset_1(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -374,7 +394,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_8_offset_2(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;
@@ -382,7 +402,7 @@ impl AhbJtag {
     }
 
     fn transform_read_ddata_8_offset_3(
-        _command: &impl Into<JtagCommand>,
+        _command: &impl JtagData,
         response_bits: &BitSlice,
     ) -> Result<CommandResult, crate::Error> {
         Self::check_seq(response_bits)?;

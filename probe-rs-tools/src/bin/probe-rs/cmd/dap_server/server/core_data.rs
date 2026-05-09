@@ -1,10 +1,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::time::Duration;
 use std::{ops::Range, path::Path};
 
 use super::session_data::{self, ActiveBreakpoint, BreakpointType, SourceLocationScope};
+use crate::cmd::dap_server::debug_adapter::dap::dap_types::{MessageSeverity, PromptKind};
 use crate::cmd::dap_server::debug_adapter::dap::repl_commands::ReplCommand;
 use crate::util::rtt::client::RttClient;
 use crate::util::rtt::{self, DataFormat, DefmtProcessor, DefmtState};
@@ -15,7 +15,7 @@ use crate::{
             dap::{
                 adapter::DebugAdapter,
                 core_status::DapStatus,
-                dap_types::{ContinuedEventBody, MessageSeverity, Source, StoppedEventBody},
+                dap_types::{ContinuedEventBody, Source, StoppedEventBody},
             },
             protocol::ProtocolAdapter,
         },
@@ -26,9 +26,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use probe_rs::semihosting::SemihostingCommand;
-use probe_rs::{
-    Architecture, BreakpointCause, BreakpointError, CoreInformation, Error, MemoryInterface as _,
-};
+use probe_rs::{Architecture, BreakpointCause, BreakpointError, Error, MemoryInterface as _};
 use probe_rs::{Core, CoreStatus, HaltReason, rtt::ScanRegion};
 use probe_rs_debug::VerifiedBreakpoint;
 use probe_rs_debug::{
@@ -50,7 +48,7 @@ pub struct CoreData {
     ///    These 'implicit' updates of `last_known_status` will not(and should not) result in a notification to the client.
     pub last_known_status: CoreStatus,
     pub target_name: String,
-    pub debug_info: DebugInfo,
+    pub debug_info: Option<DebugInfo>,
     pub static_variables: Option<VariableCache>,
     pub core_peripherals: Option<SvdCache>,
     pub stack_frames: Vec<probe_rs_debug::stack_frame::StackFrame>,
@@ -58,8 +56,6 @@ pub struct CoreData {
     pub rtt_scan_ranges: ScanRegion,
     pub rtt_connection: Option<debug_rtt::RttConnection>,
     pub rtt_client: Option<RttClient>,
-    pub clear_rtt_header: bool,
-    pub rtt_header_cleared: bool,
     pub next_semihosting_handle: u32,
     pub semihosting_handles: HashMap<u32, SemihostingFile>,
     pub repl_commands: Vec<ReplCommand>,
@@ -95,7 +91,7 @@ impl CoreHandle<'_> {
         &mut self,
         debug_adapter: &mut DebugAdapter<P>,
     ) {
-        self.core_data.last_known_status = CoreStatus::Running;
+        self.core_data.last_known_status = CoreStatus::Unknown;
         debug_adapter.all_cores_halted = false;
     }
 
@@ -143,7 +139,7 @@ impl CoreHandle<'_> {
             }
 
             CoreStatus::Halted(HaltReason::Step) => {
-                // HaltReason::Step is a special case, where we have to send a custome event to the client that the core halted.
+                // HaltReason::Step is a special case, where we have to send a custom event to the client that the core halted.
                 // In this case, we don't re-send the "stopped" event, but further down, we will
                 // update the `last_known_status` to the actual HaltReason returned by the core.
             }
@@ -156,13 +152,20 @@ impl CoreHandle<'_> {
 
             CoreStatus::Halted(_) => self.notify_halted(debug_adapter, status)?,
             CoreStatus::LockedUp => {
-                let (_, description) = status.short_long_status(None);
-                debug_adapter.show_message(MessageSeverity::Error, &description);
-                return Err(DebuggerError::Other(anyhow!(description)));
+                // TODO: We can't really continue here, but the debugger should remain working
+                //
+                // Maybe step should be prevented?
+
+                debug_adapter.show_message(
+                    MessageSeverity::Warning,
+                    format!("Core {} is in locked up state", self.core_id),
+                );
+
+                self.notify_halted(debug_adapter, status)?
             }
             CoreStatus::Unknown => {
                 let error =
-                    DebuggerError::Other(anyhow!("Unknown Device status reveived from Probe-rs"));
+                    DebuggerError::Other(anyhow!("Unknown Device status received from Probe-rs"));
                 debug_adapter.show_error_message(&error)?;
 
                 return Err(error);
@@ -187,7 +190,7 @@ impl CoreHandle<'_> {
     pub fn attach_to_rtt<P: ProtocolAdapter>(
         &mut self,
         debug_adapter: &mut DebugAdapter<P>,
-        program_binary: &Path,
+        program_binary: Option<&Path>,
         rtt_config: &rtt::RttConfig,
         timestamp_offset: UtcOffset,
     ) -> Result<()> {
@@ -200,7 +203,6 @@ impl CoreHandle<'_> {
         let client = if let Some(client) = self.core_data.rtt_client.as_mut() {
             client
         } else {
-            self.core_data.rtt_header_cleared = false;
             self.core_data.rtt_client.insert(RttClient::new(
                 rtt_config.clone(),
                 self.core_data.rtt_scan_ranges.clone(),
@@ -209,13 +211,6 @@ impl CoreHandle<'_> {
         };
 
         if client.core_id() != core_id {
-            return Ok(());
-        }
-
-        if self.core_data.clear_rtt_header && !self.core_data.rtt_header_cleared {
-            client.clear_control_block(&mut self.core)?;
-            self.core_data.rtt_header_cleared = true;
-            // Trigger a reattach
             return Ok(());
         }
 
@@ -231,17 +226,20 @@ impl CoreHandle<'_> {
         let mut debugger_rtt_channels = vec![];
 
         let mut defmt_data = None;
+        let use_auto_formats = rtt_config.channels.is_empty();
 
         for up_channel in client.up_channels() {
             let number = up_channel.up_channel.number();
+            let channel_name = up_channel.channel_name();
 
-            let mut channel_config = rtt_config
-                .channel_config(number as u32)
-                .cloned()
-                .unwrap_or_default();
+            let mut channel_config = rtt_config.channel_config(number as u32).clone();
 
-            if up_channel.channel_name() == "defmt" {
-                channel_config.data_format = DataFormat::Defmt;
+            if use_auto_formats {
+                channel_config.data_format = if channel_name == "defmt" {
+                    DataFormat::Defmt
+                } else {
+                    DataFormat::String
+                };
             }
 
             // Where `channel_config` is unspecified, apply default from `default_channel_config`.
@@ -257,30 +255,33 @@ impl CoreHandle<'_> {
                 },
                 DataFormat::BinaryLE => RttDecoder::BinaryLE,
                 DataFormat::Defmt => {
-                    let defmt_data = if let Some(data) = defmt_data.as_ref() {
+                    let defmt_state = if let Some(data) = defmt_data.as_ref() {
                         data
-                    } else {
+                    } else if let Some(program_binary) = program_binary {
                         // Create the RTT client using the RTT control block address from the ELF file.
                         let elf = std::fs::read(program_binary).map_err(|error| {
                             anyhow!("Error attempting to attach to RTT: {error}")
                         })?;
                         defmt_data.insert(DefmtState::try_from_bytes(&elf)?)
-                    };
-                    let Some(defmt_data) = defmt_data.clone() else {
-                        tracing::warn!("Defmt data not found in ELF file");
-                        continue;
+                    } else {
+                        defmt_data.insert(None)
                     };
 
-                    RttDecoder::Defmt {
-                        processor: DefmtProcessor::new(
-                            defmt_data,
-                            show_timestamps,
-                            show_location,
-                            log_format.as_deref(),
-                        ),
+                    match defmt_state {
+                        Some(defmt_state) => RttDecoder::Defmt {
+                            processor: DefmtProcessor::new(
+                                defmt_state.clone(),
+                                show_timestamps,
+                                show_location,
+                                log_format.as_deref(),
+                            ),
+                        },
+                        None => RttDecoder::BinaryLE,
                     }
                 }
             };
+
+            let data_format = DataFormat::from(&channel_data_format);
 
             debugger_rtt_channels.push(debug_rtt::DebuggerRttChannel {
                 channel_number: up_channel.number(),
@@ -289,10 +290,14 @@ impl CoreHandle<'_> {
                 channel_data_format,
             });
 
-            debug_adapter.rtt_window(
-                up_channel.number(),
-                up_channel.channel_name(),
-                channel_config.data_format,
+            debug_adapter.rtt_window(up_channel.number(), channel_name, data_format);
+        }
+
+        for down_channel in client.down_channels() {
+            debug_adapter.open_prompt(
+                PromptKind::Rtt,
+                &down_channel.channel_name(),
+                down_channel.number(),
             );
         }
 
@@ -396,11 +401,16 @@ impl CoreHandle<'_> {
         requested_breakpoint_column: Option<u64>,
         requested_source: &Source,
     ) -> Result<VerifiedBreakpoint, DebuggerError> {
+        let Some(ref debug_info) = self.core_data.debug_info else {
+            return Err(DebuggerError::Other(anyhow!(
+                "Cannot set source breakpoint without debug information."
+            )));
+        };
+
         let VerifiedBreakpoint {
                  address,
                  source_location,
-             } = self.core_data
-            .debug_info
+             } = debug_info
             .get_breakpoint_location(
                 source_path,
                 requested_breakpoint_line,
@@ -425,6 +435,9 @@ impl CoreHandle<'_> {
     /// for a specified source location, of any [`super::session_data::BreakpointType::SourceBreakpoint`].
     /// This is because the address of the breakpoint may have changed based on changes in the source file that created the new binary.
     pub(crate) fn recompute_breakpoints(&mut self) -> Result<(), DebuggerError> {
+        if self.core_data.debug_info.is_none() {
+            return Ok(());
+        }
         let target_breakpoints = self.core_data.breakpoints.clone();
         for breakpoint in target_breakpoints
             .iter()
@@ -470,9 +483,11 @@ impl CoreHandle<'_> {
 
         let mut all_discrete_memory_ranges = Vec::new();
 
-        if let Some(static_variables) = &mut self.core_data.static_variables {
+        if let Some(static_variables) = &mut self.core_data.static_variables
+            && let Some(debug_info) = self.core_data.debug_info.as_ref()
+        {
             static_variables.recurse_deferred_variables(
-                &self.core_data.debug_info,
+                debug_info,
                 &mut self.core,
                 recursion_limit,
                 StackFrameInfo {
@@ -491,18 +506,21 @@ impl CoreHandle<'_> {
                 variable_caches.push(local_variables);
             }
             for variable_cache in variable_caches {
-                // Cache the deferred top level children of the of the cache.
-                variable_cache.recurse_deferred_variables(
-                    &self.core_data.debug_info,
-                    &mut self.core,
-                    10,
-                    StackFrameInfo {
-                        registers: &frame.registers,
-                        frame_base: frame.frame_base,
-                        canonical_frame_address: frame.canonical_frame_address,
-                    },
-                );
-                all_discrete_memory_ranges.append(&mut variable_cache.get_discrete_memory_ranges());
+                if let Some(debug_info) = self.core_data.debug_info.as_ref() {
+                    // Cache the deferred top level children of the of the cache.
+                    variable_cache.recurse_deferred_variables(
+                        debug_info,
+                        &mut self.core,
+                        10,
+                        StackFrameInfo {
+                            registers: &frame.registers,
+                            frame_base: frame.frame_base,
+                            canonical_frame_address: frame.canonical_frame_address,
+                        },
+                    );
+                    all_discrete_memory_ranges
+                        .append(&mut variable_cache.get_discrete_memory_ranges());
+                }
             }
             // Also capture memory addresses for essential registers.
             for register in frame.registers.0.iter() {
@@ -734,15 +752,6 @@ impl CoreHandle<'_> {
             }
         }
     }
-
-    pub(crate) fn reset_and_halt(&mut self) -> Result<CoreInformation, Error> {
-        let core_info = self.core.reset_and_halt(Duration::from_millis(500))?;
-
-        // On some architectures, we need to re-enable any breakpoints that were previously set, because the core reset 'forgets' them.
-        self.reapply_breakpoints();
-
-        Ok(core_info)
-    }
 }
 
 /// Return a Vec of memory ranges that consolidate the adjacent memory ranges of the input ranges.
@@ -758,15 +767,15 @@ fn consolidate_memory_ranges(
     let mut condensed_range: Option<Range<u64>> = None;
 
     for memory_range in discrete_memory_ranges.iter() {
-        if let Some(range_comparitor) = condensed_range {
-            if memory_range.start <= range_comparitor.end + include_bytes_between_ranges + 1 {
-                let new_end = std::cmp::max(range_comparitor.end, memory_range.end);
+        if let Some(range_comparator) = condensed_range {
+            if memory_range.start <= range_comparator.end + include_bytes_between_ranges + 1 {
+                let new_end = std::cmp::max(range_comparator.end, memory_range.end);
                 condensed_range = Some(Range {
-                    start: range_comparitor.start,
+                    start: range_comparator.start,
                     end: new_end,
                 });
             } else {
-                consolidated_memory_ranges.push(range_comparitor);
+                consolidated_memory_ranges.push(range_comparator);
                 condensed_range = Some(memory_range.clone());
             }
         } else {
@@ -774,8 +783,8 @@ fn consolidate_memory_ranges(
         }
     }
 
-    if let Some(range_comparitor) = condensed_range {
-        consolidated_memory_ranges.push(range_comparitor);
+    if let Some(range_comparator) = condensed_range {
+        consolidated_memory_ranges.push(range_comparator);
     }
 
     consolidated_memory_ranges

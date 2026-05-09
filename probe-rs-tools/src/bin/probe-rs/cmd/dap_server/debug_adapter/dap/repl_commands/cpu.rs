@@ -1,11 +1,10 @@
 use crate::cmd::dap_server::{
-    DebuggerError,
     debug_adapter::{
         dap::{
             adapter::DebugAdapter,
             core_status::DapStatus,
-            dap_types::{EvaluateArguments, Response},
-            repl_commands::{REPL_COMMANDS, ReplCommand},
+            dap_types::EvaluateArguments,
+            repl_commands::{EvalResponse, EvalResult, REPL_COMMANDS, ReplCommand},
         },
         protocol::ProtocolAdapter,
     },
@@ -49,62 +48,33 @@ fn r#continue(
     target_core: &mut CoreHandle<'_>,
     _: &str,
     _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    target_core.core.run()?;
-    Ok(Response {
-        command: "continue".to_string(),
-        success: true,
-        message: Some(CoreStatus::Running.short_long_status(None).1),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    adapter: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
+) -> EvalResult {
+    adapter.continue_impl(target_core)?;
+    Ok(EvalResponse::Message(String::new()))
 }
 
 fn reset(
     target_core: &mut CoreHandle<'_>,
     _: &str,
     _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    let core_info = target_core.reset_and_halt()?;
-
-    Ok(Response {
-        command: "pause".to_string(),
-        success: true,
-        message: Some(
-            CoreStatus::Halted(HaltReason::Request)
-                .short_long_status(Some(core_info.pc))
-                .1,
-        ),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    adapter: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
+) -> EvalResult {
+    adapter.reset_and_halt_core(target_core)?;
+    Ok(EvalResponse::Message(String::new()))
 }
 
 fn step(
     target_core: &mut CoreHandle<'_>,
     _: &str,
     _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    let core_info = target_core.core.step()?;
+    adapter: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
+) -> EvalResult {
+    let pc = adapter.step_impl(probe_rs_debug::SteppingMode::StepInstruction, target_core)?;
 
-    Ok(Response {
-        command: "pause".to_string(),
-        success: true,
-        message: Some(
-            CoreStatus::Halted(HaltReason::Request)
-                .short_long_status(Some(core_info.pc))
-                .1,
-        ),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    Ok(EvalResponse::Message(
+        CoreStatus::Halted(HaltReason::Request)
+            .short_long_status(Some(pc))
+            .1,
+    ))
 }

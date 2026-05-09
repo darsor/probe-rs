@@ -1,24 +1,22 @@
-use std::{
-    fmt::{Display, Write},
-    path::Path,
-};
+use std::{fmt::Write, path::Path};
 
 use linkme::distributed_slice;
-use probe_rs_debug::{ColumnType, StackFrame};
 
 use crate::cmd::dap_server::{
     DebuggerError,
     debug_adapter::{
         dap::{
             adapter::DebugAdapter,
-            dap_types::{EvaluateArguments, Response},
-            repl_commands::{REPL_COMMANDS, ReplCommand},
+            dap_types::EvaluateArguments,
+            repl_commands::{EvalResponse, EvalResult, REPL_COMMANDS, ReplCommand},
             repl_types::ReplCommandArgs,
         },
         protocol::ProtocolAdapter,
     },
     server::core_data::CoreHandle,
 };
+use crate::rpc::functions::stack_trace::StackTraceFrame;
+use crate::util::cli::format_stack_frame;
 
 #[distributed_slice(REPL_COMMANDS)]
 static BACKTRACE: ReplCommand = ReplCommand {
@@ -39,38 +37,18 @@ static BACKTRACE: ReplCommand = ReplCommand {
     handler: print_backtrace,
 };
 
-struct ReplStackFrame<'a>(&'a StackFrame);
-
-impl Display for ReplStackFrame<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Header info for the StackFrame
-        write!(f, "{}", self.0.function_name)?;
-        if let Some(si) = &self.0.source_location {
-            write!(f, "\n\t{}", si.path.to_path().display())?;
-
-            if let (Some(column), Some(line)) = (si.column, si.line) {
-                match column {
-                    ColumnType::Column(c) => write!(f, ":{line}:{c}")?,
-                    ColumnType::LeftEdge => write!(f, ":{line}")?,
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 fn save_backtrace_to_yaml(
     target_core: &mut CoreHandle<'_>,
     command_arguments: &str,
     _: &EvaluateArguments,
     _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let mut args = command_arguments.split_whitespace();
 
     let write_to_file = args.next().map(Path::new);
 
     // Using the `insta` crate to serialize, because they add a couple of transformations to the yaml output,
-    // presumeably to make it easier to read.
+    // presumably to make it easier to read.
     // In our case, we want this backtrace format to be comparable to the unwind tests
     // in `probe-rs::debug::debuginfo`.
     // The reason for this is that these 'live' backtraces are used to create the 'master' snapshots,
@@ -88,43 +66,32 @@ fn save_backtrace_to_yaml(
     } else {
         yaml_data
     };
-    Ok(Response {
-        command: "backtrace".to_string(),
-        success: true,
-        message: Some(response_message),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+
+    Ok(EvalResponse::Message(response_message))
 }
 
 fn print_backtrace(
     target_core: &mut CoreHandle<'_>,
     _: &str,
     _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    let mut response_message = String::new();
+    debug_adapter: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
+) -> EvalResult {
+    // Color gating follows the DAP-negotiated `supportsAnsiStyling` capability,
+    // NOT the server's local `PROBE_RS_COLOR` env var, so the server never
+    // overrules what the client can render.
+    let colorize = Some(debug_adapter.supports_ansi_styling);
 
+    let mut response_message = String::new();
     for (i, frame) in target_core.core_data.stack_frames.iter().enumerate() {
         #[allow(clippy::unwrap_used, reason = "Writing to a string is infallible")]
         writeln!(
             &mut response_message,
-            "Frame #{}: {}",
+            "    Frame {}: {}",
             i + 1,
-            ReplStackFrame(frame)
+            format_stack_frame(&StackTraceFrame::from(frame), colorize)
         )
         .unwrap();
     }
 
-    Ok(Response {
-        command: "backtrace".to_string(),
-        success: true,
-        message: Some(response_message),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    Ok(EvalResponse::Message(response_message))
 }

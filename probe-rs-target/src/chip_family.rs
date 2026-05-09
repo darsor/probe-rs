@@ -35,16 +35,20 @@ pub enum CoreType {
     Armv6m,
     /// ARMv7-A: Cortex A7, A9, A15
     Armv7a,
+    /// ARMv7-R: Cortex R4, R5, R7, R8
+    Armv7r,
     /// ARMv7-M: Cortex M3
     Armv7m,
     /// ARMv7e-M: Cortex M4, M7
     Armv7em,
-    /// ARMv7-A: Cortex A35, A55, A72
+    /// ARMv8-A: Cortex A35, A55, A72
     Armv8a,
     /// ARMv8-M: Cortex M23, M33
     Armv8m,
-    /// RISC-V
+    /// RISC-V (32-bit)
     Riscv,
+    /// RISC-V (64-bit)
+    Riscv64,
     /// Xtensa - TODO: may need to split into NX, LX6 and LX7
     Xtensa,
     /// SPARC - TODO(darsor): may need to split into V7, V8, etc.
@@ -61,7 +65,7 @@ impl CoreType {
     }
 
     fn is_riscv(&self) -> bool {
-        matches!(self, CoreType::Riscv)
+        matches!(self, CoreType::Riscv | CoreType::Riscv64)
     }
 
     fn is_xtensa(&self) -> bool {
@@ -73,6 +77,7 @@ impl CoreType {
             self,
             CoreType::Armv6m
                 | CoreType::Armv7a
+                | CoreType::Armv7r
                 | CoreType::Armv7em
                 | CoreType::Armv7m
                 | CoreType::Armv8a
@@ -87,7 +92,7 @@ impl CoreType {
     /// Returns the parent architecture family of this core type.
     pub fn architecture(&self) -> Architecture {
         match self {
-            CoreType::Riscv => Architecture::Riscv,
+            CoreType::Riscv | CoreType::Riscv64 => Architecture::Riscv,
             CoreType::Xtensa => Architecture::Xtensa,
             CoreType::Sparc => Architecture::Sparc,
             _ => Architecture::Arm,
@@ -121,6 +126,10 @@ pub enum InstructionSet {
     RV32,
     /// RISC-V 32-bit compressed instruction sets (RV32C) - covers all ISA variants that allow compressed 16-bit instructions.
     RV32C,
+    /// RISC-V 64-bit uncompressed instruction sets (RV64) - covers all ISA variants that use 32-bit instructions in 64-bit mode.
+    RV64,
+    /// RISC-V 64-bit compressed instruction sets (RV64C) - covers all ISA variants that allow compressed 16-bit instructions in 64-bit mode.
+    RV64C,
     /// Xtensa instruction set
     Xtensa,
     // TODO(darsor): should this include V7/v8?
@@ -144,6 +153,12 @@ impl InstructionSet {
                     } else {
                         Some(InstructionSet::RV32)
                     }
+                } else if let Some(features) = other.strip_prefix("riscv64") {
+                    if features.contains('c') {
+                        Some(InstructionSet::RV64C)
+                    } else {
+                        Some(InstructionSet::RV64)
+                    }
                 } else {
                     None
                 }
@@ -162,6 +177,9 @@ impl InstructionSet {
             InstructionSet::A64 => 4,
             InstructionSet::RV32 => 4,
             InstructionSet::RV32C => 2,
+            // RV64 uses 32-bit base instructions; compressed mode allows 16-bit instructions
+            InstructionSet::RV64 => 4,
+            InstructionSet::RV64C => 2,
             InstructionSet::Xtensa => 2,
             InstructionSet::Sparc => 4,
         }
@@ -181,6 +199,7 @@ impl InstructionSet {
         matches!(
             (self, instr_set),
             (InstructionSet::RV32C, InstructionSet::RV32)
+                | (InstructionSet::RV64C, InstructionSet::RV64)
         )
     }
 }
@@ -350,8 +369,10 @@ impl ChipFamily {
                         ));
                     }
                     CoreAccessOptions::Arm(options) => {
-                        if matches!(core.core_type, CoreType::Armv7a | CoreType::Armv8a)
-                            && options.debug_base.is_none()
+                        if matches!(
+                            core.core_type,
+                            CoreType::Armv7a | CoreType::Armv7r | CoreType::Armv8a
+                        ) && options.debug_base.is_none()
                         {
                             return Err(format!("Core {} requires setting debug_base", core.name));
                         }

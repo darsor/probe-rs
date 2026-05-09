@@ -11,7 +11,10 @@ use crate::{
     },
     config::{DebugSequence, Registry},
     error::Error,
-    vendor::{Vendor, infineon::sequences::xmc4000::XMC4000},
+    vendor::{
+        Vendor,
+        infineon::sequences::{psoc_edge, xmc4000::XMC4000},
+    },
 };
 
 pub mod sequences;
@@ -20,13 +23,15 @@ pub mod sequences;
 #[derive(docsplay::Display)]
 pub struct Infineon;
 
-const INFINEON: JEP106Code = JEP106Code { id: 0x41, cc: 0x00 };
-const CYPRESS: JEP106Code = JEP106Code { id: 0x34, cc: 0x00 };
+const JEP_INFINEON: JEP106Code = JEP106Code { id: 0x41, cc: 0x00 };
+const JEP_CYPRESS: JEP106Code = JEP106Code { id: 0x34, cc: 0x00 };
 
 impl Vendor for Infineon {
     fn try_create_debug_sequence(&self, chip: &Chip) -> Option<DebugSequence> {
         let sequence = if chip.name.starts_with("XMC4") {
             DebugSequence::Arm(XMC4000::create())
+        } else if chip.name.starts_with("PSE84") {
+            DebugSequence::Arm(psoc_edge::PsocEdge::create(chip))
         } else {
             return None;
         };
@@ -53,7 +58,7 @@ fn try_detect_xmc4xxx(
     interface: &mut dyn ArmDebugInterface,
     chip_info: &ArmChipInfo,
 ) -> Result<Option<String>, Error> {
-    if chip_info.manufacturer != INFINEON {
+    if chip_info.manufacturer != JEP_INFINEON {
         return Ok(None);
     }
 
@@ -156,7 +161,7 @@ fn try_detect_psoc(
     interface: &mut dyn ArmDebugInterface,
     chip_info: &ArmChipInfo,
 ) -> Result<Option<String>, Error> {
-    if chip_info.manufacturer != INFINEON && chip_info.manufacturer != CYPRESS {
+    if chip_info.manufacturer != JEP_INFINEON && chip_info.manufacturer != JEP_CYPRESS {
         return Ok(None);
     }
 

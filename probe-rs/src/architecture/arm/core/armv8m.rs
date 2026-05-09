@@ -165,7 +165,7 @@ impl CoreInterface for Armv8m<'_> {
             if self.state.current_state.is_halted() {
                 // There shouldn't be any bits set, otherwise it means
                 // that the reason for the halt has changed. No bits set
-                // means that we have an unkown HaltReason.
+                // means that we have an unknown HaltReason.
                 if reason == HaltReason::Unknown {
                     tracing::debug!("Cached halt reason: {:?}", self.state.current_state);
                     return Ok(self.state.current_state);
@@ -253,8 +253,9 @@ impl CoreInterface for Armv8m<'_> {
 
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv8m, None)?;
-        // Invalidate cached core status
+        // Invalidate cached state: chip reset clears FP_CTRL and core status
         self.set_core_status(CoreStatus::Unknown);
+        self.state.hw_breakpoints_enabled = false;
         Ok(())
     }
 
@@ -266,8 +267,9 @@ impl CoreInterface for Armv8m<'_> {
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv8m, None)?;
 
-        // Invalidate cached core status
+        // Invalidate cached state: chip reset clears FP_CTRL and core status
         self.set_core_status(CoreStatus::Unknown);
+        self.state.hw_breakpoints_enabled = false;
 
         // Some processors may not enter the halt state immediately after clearing the reset state.
         // Particularly: on PSOC 6, vector catch takes effect after the core's boot ROM finishes
@@ -564,6 +566,9 @@ impl CoreInterface for Armv8m<'_> {
                     demcr.set_vc_sferr(true);
                 }
             }
+            VectorCatchCondition::Svc | VectorCatchCondition::Hlt => {
+                return Err(Error::NotImplemented("vector catch condition Svc/Hlt"));
+            }
         };
 
         self.memory
@@ -589,6 +594,9 @@ impl CoreInterface for Armv8m<'_> {
                 if idpfr1.security_present() {
                     demcr.set_vc_sferr(false);
                 }
+            }
+            VectorCatchCondition::Svc | VectorCatchCondition::Hlt => {
+                return Err(Error::NotImplemented("vector catch condition Svc/Hlt"));
             }
         };
 

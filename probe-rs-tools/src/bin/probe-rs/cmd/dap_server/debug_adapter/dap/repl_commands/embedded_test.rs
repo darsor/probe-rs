@@ -8,9 +8,8 @@ use crate::cmd::{
         debug_adapter::{
             dap::{
                 adapter::DebugAdapter,
-                core_status::DapStatus,
-                dap_types::{EvaluateArguments, Response},
-                repl_commands::{ReplCommand, need_subcommand},
+                dap_types::EvaluateArguments,
+                repl_commands::{EvalResponse, EvalResult, ReplCommand, need_subcommand},
                 repl_types::ReplCommandArgs,
             },
             protocol::ProtocolAdapter,
@@ -51,7 +50,7 @@ fn list_tests(
     _: &str,
     _: &EvaluateArguments,
     _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let Some(test_data) = target_core
         .core_data
         .test_data
@@ -69,15 +68,7 @@ fn list_tests(
         .collect::<Vec<&str>>();
     tests.sort();
 
-    Ok(Response {
-        command: "tests".to_string(),
-        success: true,
-        message: Some(tests.join("\n")),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    Ok(EvalResponse::Message(tests.join("\n")))
 }
 
 fn run_test(
@@ -85,7 +76,7 @@ fn run_test(
     test_name: &str,
     _: &EvaluateArguments,
     adapter: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let Some(test_data) = target_core
         .core_data
         .test_data
@@ -108,7 +99,7 @@ fn run_test(
         )));
     };
 
-    target_core.reset_and_halt()?;
+    adapter.reset_and_halt_core(target_core)?;
     target_core.core.run()?;
     target_core
         .core
@@ -126,21 +117,14 @@ fn run_test(
     // Select and start the test
     request
         .write_command_line_to_target(&mut target_core.core, &format!("run_addr {}", address))?;
-    target_core.core.run()?;
 
+    // TODO: adapter.resume_core
+    target_core.core.run()?;
     target_core.reset_core_status(adapter);
 
     // TODO: wait for a bit (while polling RTT) for the test to either complete
     // or the target to halt again? That way we could print the _actual_ test result
     // based on the expectation.
 
-    Ok(Response {
-        command: "continue".to_string(),
-        success: true,
-        message: Some(CoreStatus::Running.short_long_status(None).1),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    Ok(EvalResponse::Message(String::new()))
 }

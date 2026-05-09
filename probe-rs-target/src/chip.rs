@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use super::memory::MemoryRegion;
-use crate::{CoreType, serialize::hex_option};
+use crate::{
+    CoreType,
+    serialize::{hex_option, hex_u_int},
+};
 use serde::{Deserialize, Serialize};
 
 /// Represents a DAP scan chain element.
@@ -55,6 +58,15 @@ pub struct Jtag {
     /// ref: `<https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/sdf_pg.html#sdf_element_scanchain>`
     #[serde(default)]
     pub scan_chain: Option<Vec<ScanChainElement>>,
+
+    /// When set to `true`, the scan chain described in `scan_chain` is used as-is, bypassing
+    /// the JTAG auto-detection (DR/IR scan). This is required for targets whose JTAG TAP does
+    /// not respond to the standard IDCODE scan (e.g., some RISC-V cores during early power-up).
+    ///
+    /// When `false` (the default), `scan_chain` is treated as a hint for IR-length disambiguation
+    /// during the normal auto-detection scan.
+    #[serde(default)]
+    pub force_scan_chain: bool,
 
     /// Describes JTAG tunnel for Risc-V
     #[serde(default)]
@@ -198,6 +210,7 @@ pub enum ApAddress {
     /// # Note
     /// This represents a base address within the root DP memory space.
     #[serde(rename = "v2")]
+    #[serde(serialize_with = "hex_u_int")]
     V2(u64),
 }
 
@@ -237,6 +250,10 @@ pub struct RiscvCoreAccessOptions {
 
     /// The JTAG TAP index of the core's debug module
     pub jtag_tap: Option<usize>,
+
+    /// CoreSight/mem-AP to use as DTM. This is the method used for RP235x
+    #[serde(default)]
+    pub mem_ap: Option<ApAddress>,
 }
 
 /// The data required to access an Xtensa core

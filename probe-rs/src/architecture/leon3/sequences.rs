@@ -53,15 +53,9 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
         &self,
         reset_addr: u64,
         session: &mut Session,
+        core_id: usize,
     ) -> Result<(), crate::Error> {
         tracing::info!("Performing RAM flash start");
-
-        if session.list_cores().len() > 1 {
-            return Err(crate::Error::NotImplemented(
-                "multi-core ram flash start not implemented yet",
-            ));
-        }
-
         tracing::debug!("Reset address: 0x{reset_addr:08X}");
         // FIXME: currently defaulting stack pointer to end of RAM region
         // we're flashing into. Is there a better heuristic? Or at least
@@ -80,7 +74,7 @@ pub trait Leon3DebugSequence: Send + Sync + Debug {
         let stack_pointer = valid_32bit_address(stack_pointer)?;
 
         tracing::debug!("RAM flash start for LEON3 single core target");
-        let mut core = session.core(0)?;
+        let mut core = session.core(core_id)?;
 
         core.write_core_reg(PC.id, reset_addr as u32)?;
         core.write_core_reg(NPC.id, reset_addr as u32 + 4)?;

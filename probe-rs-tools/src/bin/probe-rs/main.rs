@@ -17,7 +17,11 @@ use figment::providers::{Data, Format as _, Json, Toml, Yaml};
 use figment::value::Value;
 use itertools::Itertools;
 use postcard_schema::Schema;
+use probe_rs::flashing::{
+    BinLoader, BinOptions, ElfLoader, ElfOptions, HexLoader, ImageLoader, Uf2Loader,
+};
 use probe_rs::{Target, probe::list::Lister};
+use probe_rs_espressif::image_format::IdfLoader;
 use report::Report;
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, UtcOffset};
@@ -118,10 +122,7 @@ impl Cli {
             Subcommand::Info(cmd) => cmd.run(client).await,
             Subcommand::Gdb(cmd) => cmd.run(&mut *client.registry().await, &lister),
             Subcommand::Reset(cmd) => cmd.run(client).await,
-            Subcommand::Debug(cmd) => {
-                cmd.run(&mut *client.registry().await, &lister, utc_offset)
-                    .await
-            }
+            Subcommand::Debug(cmd) => cmd.run(client, utc_offset).await,
             Subcommand::Download(cmd) => cmd.run(client).await,
             Subcommand::Run(cmd) => cmd.run(client, utc_offset).await,
             Subcommand::Attach(cmd) => cmd.run(client, utc_offset).await,
@@ -142,8 +143,8 @@ impl Cli {
     fn elf(&self) -> Option<PathBuf> {
         match self.subcommand {
             Subcommand::Download(ref cmd) => Some(cmd.path.clone()),
-            Subcommand::Run(ref cmd) => Some(cmd.shared_options.path.clone()),
-            Subcommand::Attach(ref cmd) => Some(cmd.run.shared_options.path.clone()),
+            Subcommand::Run(ref cmd) => Some(cmd.path.clone()),
+            Subcommand::Attach(ref cmd) => cmd.path.clone(),
             Subcommand::Verify(ref cmd) => Some(cmd.path.clone()),
             _ => None,
         }
@@ -228,10 +229,10 @@ pub(crate) struct CoreOptions {
 #[serde(default)]
 pub struct BinaryCliOptions {
     /// The address in memory where the binary will be put at. This is only considered when `bin` is selected as the format.
-    #[clap(long, value_parser = parse_u64, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, value_parser = parse_u64, help_heading = "DOWNLOAD CONFIGURATION / BIN IMAGE")]
     base_address: Option<u64>,
     /// The number of bytes to skip at the start of the binary file. This is only considered when `bin` is selected as the format.
-    #[clap(long, value_parser = parse_u32, default_value = "0", help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, value_parser = parse_u32, default_value = "0", help_heading = "DOWNLOAD CONFIGURATION / BIN IMAGE")]
     skip: u32,
 }
 
@@ -329,19 +330,19 @@ impl From<EspFlashMode> for espflash::flasher::FlashMode {
 #[serde(default)]
 pub struct IdfCliOptions {
     /// The idf bootloader path
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ESP-IDF IMAGE")]
     idf_bootloader: Option<String>,
     /// The idf partition table path
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ESP-IDF IMAGE")]
     idf_partition_table: Option<String>,
     /// The idf target app partition
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ESP-IDF IMAGE")]
     idf_target_app_partition: Option<String>,
     /// Flash SPI mode
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ESP-IDF IMAGE")]
     idf_flash_mode: Option<EspFlashMode>,
     /// Flash SPI frequency
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ESP-IDF IMAGE")]
     idf_flash_freq: Option<EspFlashFrequency>,
 }
 
@@ -350,7 +351,7 @@ pub struct IdfCliOptions {
 pub struct ElfCliOptions {
     /// Section name to skip flashing. This option may be specified multiple times, and is only
     /// considered when `elf` is selected as the format.
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION / ELF IMAGE")]
     skip_section: Vec<String>,
 }
 
@@ -365,16 +366,16 @@ pub struct FormatOptions {
         long,
         help_heading = "DOWNLOAD CONFIGURATION"
     )]
-    binary_format: FormatKind,
+    pub binary_format: FormatKind,
 
     #[clap(flatten)]
-    bin_options: BinaryCliOptions,
+    pub bin_options: BinaryCliOptions,
 
     #[clap(flatten)]
-    idf_options: IdfCliOptions,
+    pub idf_options: IdfCliOptions,
 
     #[clap(flatten)]
-    elf_options: ElfCliOptions,
+    pub elf_options: ElfCliOptions,
 }
 
 /// A finite list of all the available binary formats probe-rs understands.
@@ -404,26 +405,6 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
-    fn to_probe_rs(self, target: &Target) -> probe_rs::flashing::FormatKind {
-        let this = if self == FormatKind::Target {
-            FormatKind::from_optional(target.default_format.as_deref())
-                .expect("Failed to parse a default binary format. This shouldn't happen.")
-        } else {
-            self
-        };
-
-        match this {
-            FormatKind::Target => unreachable!(),
-            FormatKind::Bin => probe_rs::flashing::FormatKind::Bin,
-            FormatKind::Hex => probe_rs::flashing::FormatKind::Hex,
-            FormatKind::Elf => probe_rs::flashing::FormatKind::Elf,
-            FormatKind::Uf2 => probe_rs::flashing::FormatKind::Uf2,
-            FormatKind::Idf => probe_rs::flashing::FormatKind::Idf,
-        }
-    }
-}
-
-impl FormatKind {
     /// Creates a new Format from an optional string.
     ///
     /// If the string is `None`, the default format is returned.
@@ -433,14 +414,48 @@ impl FormatKind {
             None => Ok(Self::Elf),
         }
     }
+
+    /// Replaces `FormatKind::Target` with a default format based on the target.
+    pub fn resolve(self, target: &Target) -> FormatKind {
+        if self == FormatKind::Target {
+            FormatKind::from_optional(target.default_format.as_deref())
+                .expect("Failed to parse a default binary format. This shouldn't happen.")
+        } else {
+            self
+        }
+    }
 }
 
 impl FormatOptions {
     /// If a format is provided, use it.
     /// If a target has a preferred format, we use that.
-    /// Finally, if neither of the above cases are true, we default to [`Format::default()`].
-    pub fn to_format_kind(&self, target: &Target) -> probe_rs::flashing::FormatKind {
-        self.binary_format.to_probe_rs(target)
+    /// Finally, if neither of the above cases are true, we default to [`FormatKind::default()`].
+    fn image_loader(&self, target: &Target) -> Box<dyn ImageLoader> {
+        match self.binary_format.resolve(target) {
+            FormatKind::Target => unreachable!(),
+            FormatKind::Bin => Box::new(BinLoader(BinOptions {
+                base_address: self.bin_options.base_address,
+                skip: self.bin_options.skip,
+            })),
+
+            FormatKind::Hex => Box::new(HexLoader),
+            FormatKind::Elf => Box::new(ElfLoader(ElfOptions {
+                skip_sections: self.elf_options.skip_section.clone(),
+            })),
+            FormatKind::Uf2 => Box::new(Uf2Loader),
+
+            FormatKind::Idf => Box::new(IdfLoader {
+                bootloader: self.idf_options.idf_bootloader.as_ref().map(PathBuf::from),
+                partition_table: self
+                    .idf_options
+                    .idf_partition_table
+                    .as_ref()
+                    .map(PathBuf::from),
+                target_app_partition: self.idf_options.idf_target_app_partition.clone(),
+                flash_frequency: self.idf_options.idf_flash_freq.map(From::from),
+                flash_mode: self.idf_options.idf_flash_mode.map(From::from),
+            }),
+        }
     }
 }
 
@@ -519,6 +534,8 @@ fn multicall_check(args: &[OsString], want: &str) -> Option<Vec<OsString>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    probe_rs_espressif::register_plugin();
+
     // Determine the local offset as early as possible to avoid potential
     // issues with multiple threads and getting the offset.
     // FIXME: we should probably let the user know if we can't determine the offset. However,
@@ -587,9 +604,10 @@ async fn main() -> Result<()> {
 
     if is_local {
         // TODO: do something with remote crashes
-        compile_report(result, report_path, elf, log_path.as_deref())?;
+        compile_report(result, report_path, elf, log_path.as_deref())
+    } else {
+        result
     }
-    Ok(())
 }
 
 /// Runs the callback using either a local or remote RPC client.

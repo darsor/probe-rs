@@ -3,30 +3,30 @@ use super::{
     core_data::{CoreData, CoreHandle},
 };
 use crate::{
+    FormatKind,
     cmd::{
         dap_server::{
             DebuggerError,
             debug_adapter::{
                 dap::{
                     adapter::DebugAdapter,
+                    core_status::DapStatus,
                     dap_types::Source,
                     repl_commands::{REPL_COMMANDS, embedded_test::EMBEDDED_TEST},
                 },
                 protocol::ProtocolAdapter,
             },
-            server::startup::TargetSessionType,
         },
         run::EmbeddedTestElfInfo,
     },
-    util::{common_options::OperationError, rtt},
+    util::common_options::OperationError,
 };
 use anyhow::{Result, anyhow};
 use probe_rs::{
     BreakpointCause, CoreStatus, HaltReason, Session, VectorCatchCondition,
     config::{Registry, TargetSelector},
-    flashing::FormatKind,
     probe::list::Lister,
-    rtt::ScanRegion,
+    rtt::{Rtt, ScanRegion, find_rtt_control_block_in_raw_file},
 };
 use probe_rs_debug::{
     DebugRegisters, SourceLocation, debug_info::DebugInfo, exception_handler_for_core,
@@ -82,7 +82,6 @@ impl SessionData {
         lister: &Lister,
         config: &mut configuration::SessionConfig,
         timestamp_offset: UtcOffset,
-        session_type: TargetSessionType,
     ) -> Result<Self, DebuggerError> {
         let target_selector = TargetSelector::from(config.chip.as_deref());
 
@@ -106,13 +105,22 @@ impl SessionData {
                         }
                         other_attach_error => other_attach_error.into(),
                     },
-                    // Return the orginal error.
+                    // Return the original error.
                     other => other.into(),
                 }
             })?;
 
         // Change the current working directory if `config.cwd` is `Some(T)`.
-        if let Some(new_cwd) = config.cwd.clone() {
+        //
+        // Skipped in `remote_server_mode`: there `cwd` is a path on the *client's* filesystem
+        // (kept around as a display-only string for log messages), so calling `set_current_dir`
+        // with it on the server would fail. Relative-path resolution against `cwd` does not
+        // apply in remote mode — every client-supplied file path arrives either already absolute,
+        // or materialized by [`SessionConfig::materialize_uploaded_files`] to an absolute temp
+        // path — so the working directory does not need to change for downstream code to work.
+        if !config.remote_server_mode
+            && let Some(new_cwd) = config.cwd.clone()
+        {
             set_current_dir(new_cwd.as_path()).map_err(|err| {
                 anyhow!("Failed to set current working directory to: {new_cwd:?}, {err:?}")
             })?;
@@ -143,7 +151,12 @@ impl SessionData {
         let mut core_data_vec = vec![];
 
         for core_configuration in valid_core_configs {
-            if core_configuration.catch_hardfault || core_configuration.catch_reset {
+            let needs_vector_catch = core_configuration.catch_hardfault
+                || core_configuration.catch_reset
+                || core_configuration.catch_svc
+                || core_configuration.catch_hlt;
+
+            if needs_vector_catch {
                 let mut core = target_session.core(core_configuration.core_index)?;
                 let was_halted = core.core_halted()?;
 
@@ -159,6 +172,18 @@ impl SessionData {
                 }
                 if core_configuration.catch_reset {
                     match core.enable_vector_catch(VectorCatchCondition::CoreReset) {
+                        Ok(_) | Err(probe_rs::Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
+                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+                    }
+                }
+                if core_configuration.catch_svc {
+                    match core.enable_vector_catch(VectorCatchCondition::Svc) {
+                        Ok(_) | Err(probe_rs::Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
+                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+                    }
+                }
+                if core_configuration.catch_hlt {
+                    match core.enable_vector_catch(VectorCatchCondition::Hlt) {
                         Ok(_) | Err(probe_rs::Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
                         Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
                     }
@@ -206,9 +231,6 @@ impl SessionData {
                 rtt_scan_ranges: ScanRegion::Ranges(vec![]),
                 rtt_connection: None,
                 rtt_client: None,
-                // For launch requests, always clear the RTT header, otherwise we may attach before the channel names are set.
-                clear_rtt_header: session_type == TargetSessionType::LaunchRequest,
-                rtt_header_cleared: false,
 
                 // We're abusing the RTT window machinery here for simplicity.
                 // Let's assume there are less than 1024 RTT channels.
@@ -246,7 +268,8 @@ impl SessionData {
         let image_format = config
             .flashing_config
             .format_options
-            .to_format_kind(self.session.target());
+            .binary_format
+            .resolve(self.session.target());
 
         for core_configuration in valid_core_configs {
             let Some(core_data) = self
@@ -264,16 +287,31 @@ impl SessionData {
                     let elf = std::fs::read(program_binary)
                         .map_err(|error| anyhow!("Error attempting to attach to RTT: {error}"))?;
 
-                    match rtt::get_rtt_symbol_from_bytes(&elf) {
-                        Ok(address) => ScanRegion::Exact(address),
+                    if let Ok(Some(addr)) = find_rtt_control_block_in_raw_file(&elf) {
+                        ScanRegion::Exact(addr)
+                    } else {
                         // Do not scan the memory for the control block.
-                        _ => ScanRegion::Ranges(vec![]),
+                        ScanRegion::Ranges(vec![])
                     }
                 }
                 _ => ScanRegion::Ranges(vec![]),
             };
         }
 
+        Ok(())
+    }
+
+    /// Clear stale RTT control blocks for all cores.
+    ///
+    /// This should be called while the core is halted, before a reset, to wipe
+    /// stale RTT data from a previous debug session. After reset, the firmware
+    /// startup code will reinitialize the block from `.data`.
+    pub(crate) fn clear_rtt_blocks(&mut self) -> Result<(), DebuggerError> {
+        for core_data in self.core_data.iter() {
+            let mut core = self.session.core(core_data.core_index)?;
+            Rtt::clear_control_block(&mut core, &core_data.rtt_scan_ranges)
+                .map_err(|e| anyhow::anyhow!("Failed to clear RTT control block: {e}"))?;
+        }
         Ok(())
     }
 
@@ -336,7 +374,7 @@ impl SessionData {
     ///
     /// Return a boolean indicating whether we should consider a short delay before the next poll.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) async fn poll_cores<P: ProtocolAdapter>(
+    pub(crate) fn poll_cores<P: ProtocolAdapter>(
         &mut self,
         session_config: &SessionConfig,
         debug_adapter: &mut DebugAdapter<P>,
@@ -374,18 +412,14 @@ impl SessionData {
             if core_config.rtt_config.enabled {
                 if let Some(core_rtt) = &mut target_core.core_data.rtt_connection {
                     // We should poll the target for rtt data, and if any RTT data was processed, we clear the flag.
-                    if core_rtt
-                        .process_rtt_data(debug_adapter, &mut target_core.core)
-                        .await
-                    {
+                    if core_rtt.process_rtt_data(debug_adapter, &mut target_core.core) {
                         suggest_delay_required = false;
                     }
                 } else if debug_adapter.configuration_is_done() {
                     // Make sure we only attempt attaching when we're ready.
-                    #[expect(clippy::unwrap_used)]
                     if let Err(error) = target_core.attach_to_rtt(
                         debug_adapter,
-                        core_config.program_binary.as_ref().unwrap(),
+                        core_config.program_binary.as_deref(),
                         &core_config.rtt_config,
                         timestamp_offset,
                     ) {
@@ -396,32 +430,46 @@ impl SessionData {
                 }
             }
 
-            // Handle potential semihosting commands. If the command is handled,
-            // the core will be resumed, so we need to update the status.
-            // If the command is not handled, the core will remain halted and we
-            // need to notify the UI.
-            if current_core_status != previous_core_status
-                && let CoreStatus::Halted(HaltReason::Breakpoint(BreakpointCause::Semihosting(
+            if current_core_status != previous_core_status {
+                if let CoreStatus::Halted(HaltReason::Breakpoint(BreakpointCause::Semihosting(
                     command,
                 ))) = current_core_status
-            {
-                current_core_status = target_core.handle_semihosting(debug_adapter, command)?;
+                {
+                    // Handle semihosting commands. If the command is handled,
+                    // the core will be resumed, so we need to update the status.
+                    // If the command is not handled, the core will remain halted and we
+                    // need to notify the UI.
+                    current_core_status = target_core.handle_semihosting(debug_adapter, command)?;
 
-                if current_core_status.is_halted() {
-                    // poll_core did not notify about the halt, so we need to do it manually.
-                    target_core.notify_halted(debug_adapter, current_core_status)?;
+                    if current_core_status.is_halted() {
+                        // poll_core did not notify about the halt, so we need to do it manually.
+                        target_core.notify_halted(debug_adapter, current_core_status)?;
+                    } else {
+                        // If the semihosting command was handled, we do not need to suggest a delay.
+                        suggest_delay_required = false;
+                    }
+                    target_core.core_data.last_known_status = current_core_status;
                 } else {
-                    // If the semihosting command was handled, we do not need to suggest a delay.
-                    suggest_delay_required = false;
+                    // The core's status has changed, print it.
+                    let pc = if current_core_status.is_halted() {
+                        target_core
+                            .core
+                            .read_core_reg(target_core.core.program_counter())
+                            .ok()
+                    } else {
+                        None
+                    };
+                    debug_adapter.log_to_console(current_core_status.short_long_status(pc).1);
                 }
-                target_core.core_data.last_known_status = current_core_status;
             }
 
             // If the core is running, we set the flag to indicate that at least one core is not halted.
             // By setting it here, we ensure that RTT will be checked at least once after the core has halted.
             if !current_core_status.is_halted() {
                 debug_adapter.all_cores_halted = false;
-            } else if !cores_halted_previously {
+            } else if !cores_halted_previously
+                && let Some(debug_info) = target_core.core_data.debug_info.as_ref()
+            {
                 // If currently halted, and was previously running
                 // update the stack frames
                 let _stackframe_span = tracing::debug_span!("Update Stack Frames").entered();
@@ -436,10 +484,10 @@ impl SessionData {
 
                 if target_core.core_data.static_variables.is_none() {
                     target_core.core_data.static_variables =
-                        Some(target_core.core_data.debug_info.create_static_scope_cache());
+                        Some(debug_info.create_static_scope_cache());
                 }
 
-                target_core.core_data.stack_frames = target_core.core_data.debug_info.unwind(
+                target_core.core_data.stack_frames = debug_info.unwind(
                     &mut target_core.core,
                     initial_registers,
                     exception_interface.as_ref(),
@@ -472,13 +520,12 @@ impl SessionData {
     }
 }
 
-fn debug_info_from_binary(core_configuration: &CoreConfig) -> anyhow::Result<DebugInfo> {
+fn debug_info_from_binary(core_configuration: &CoreConfig) -> anyhow::Result<Option<DebugInfo>> {
     let Some(ref binary_path) = core_configuration.program_binary else {
-        return Err(anyhow!(
-            "Please provide a valid `program_binary` for debug core: {}",
-            core_configuration.core_index
-        ));
+        return Ok(None);
     };
 
-    DebugInfo::from_file(binary_path).map_err(|error| anyhow!(error))
+    DebugInfo::from_file(binary_path)
+        .map_err(|error| anyhow!(error))
+        .map(Some)
 }

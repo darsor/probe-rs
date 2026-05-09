@@ -9,8 +9,8 @@ use crate::cmd::dap_server::{
     debug_adapter::{
         dap::{
             adapter::DebugAdapter,
-            dap_types::{EvaluateArguments, MemoryAddress, Response},
-            repl_commands::{REPL_COMMANDS, ReplCommand},
+            dap_types::{EvaluateArguments, MemoryAddress},
+            repl_commands::{EvalResponse, EvalResult, REPL_COMMANDS, ReplCommand},
             repl_commands_helpers::{get_local_variable, memory_read},
             repl_types::{GdbFormat, GdbNuf, ReplCommandArgs},
         },
@@ -22,7 +22,7 @@ use crate::cmd::dap_server::{
 #[distributed_slice(REPL_COMMANDS)]
 static PRINT: ReplCommand = ReplCommand {
     command: "p",
-    // Stricly speaking, gdb refers to this as an expression, but we only support variables.
+    // Strictly speaking, gdb refers to this as an expression, but we only support variables.
     help_text: "Print known information about variable.",
     requires_target_halted: true,
     sub_commands: &[],
@@ -65,7 +65,7 @@ fn print_variables(
     command_arguments: &str,
     evaluate_arguments: &EvaluateArguments,
     _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let input_arguments = command_arguments.split_whitespace();
     let mut gdb_nuf = GdbNuf {
         format_specifier: GdbFormat::Native,
@@ -101,7 +101,7 @@ fn examine_memory(
     command_arguments: &str,
     request_arguments: &EvaluateArguments,
     _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let input_arguments = command_arguments.split_whitespace();
     let mut gdb_nuf = GdbNuf {
         ..Default::default()
@@ -135,6 +135,17 @@ fn examine_memory(
                         "Format specifier : {}, is not valid here.\nPlease select one of the supported formats:\n{error}", gdb_nuf.format_specifier
                     ))
                 })?;
+        } else if let Some(reg) = input_argument.strip_prefix('$') {
+            let Some(register) = target_core.core.registers().all_registers().find(|r| {
+                std::iter::once(r.name().to_string())
+                    .chain(r.roles.iter().map(|role| role.to_string()))
+                    .any(|name| name.eq_ignore_ascii_case(reg))
+            }) else {
+                return Err(DebuggerError::UserMessage(format!(
+                    "Undefined register ${reg:?}."
+                )));
+            };
+            input_address = target_core.core.read_core_reg(register)?;
         } else {
             return Err(DebuggerError::UserMessage(
                 "Invalid parameters. See the `help` command for more information.".to_string(),
@@ -172,7 +183,7 @@ fn dump_core(
     command_arguments: &str,
     _: &EvaluateArguments,
     _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
+) -> EvalResult {
     let mut args = command_arguments.split_whitespace().collect::<Vec<_>>();
 
     // If we get an odd number of arguments, treat all n * 2 args at the start as memory blocks
@@ -223,15 +234,7 @@ fn dump_core(
     };
     CoreDump::dump_core(&mut target_core.core, ranges)?.store(location)?;
 
-    Ok(Response {
-        command: "dump".to_string(),
-        success: true,
-        message: Some(format!(
-            "Core dump {range_string} successfully stored at {location:?}.",
-        )),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+    Ok(EvalResponse::Message(format!(
+        "Core dump {range_string} successfully stored at {location:?}.",
+    )))
 }

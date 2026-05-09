@@ -1,11 +1,26 @@
+//! USB bulk transfer utilities.
+
 use nusb::{
     Interface,
     transfer::{Buffer, Bulk, In, Out},
 };
+use std::fmt::Write;
 use std::{io, time::Duration};
 
+/// Encode a usb serial number as a hex
+pub(crate) fn to_hex(s: &str) -> String {
+    s.as_bytes().iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02X}"); // Writing a String never fails
+        s
+    })
+}
+
+/// USB bulk transfer utility functions.
 pub trait InterfaceExt {
+    /// Reads data from the given bulk endpoint into the provided buffer.
     fn read_bulk(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
+
+    /// Writes data to the given bulk endpoint from the provided buffer.
     fn write_bulk(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> io::Result<usize>;
 }
 

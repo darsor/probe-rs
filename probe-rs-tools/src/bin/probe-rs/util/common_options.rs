@@ -46,7 +46,7 @@ pub struct BinaryDownloadOptions {
     /// Whether to read the RTT output from the flash loader, if available.
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub read_flasher_rtt: bool,
-    /// The preferred flash algorithms for specific memory regions can be overriden.
+    /// The preferred flash algorithms for specific memory regions can be overridden.
     ///
     /// Multiple algorithms can be specified as a comma-separated list, e.g. --prefer-flash-algorithm=algo1,algo2
     #[arg(
@@ -101,6 +101,14 @@ pub struct ProbeOptions {
     #[arg(long, env = "PROBE_RS_PROTOCOL", help_heading = "PROBE CONFIGURATION")]
     pub protocol: Option<WireProtocol>,
 
+    /// Whether to cycle usb power before run.
+    #[arg(
+        long,
+        env = "PROBE_RS_CYCLE_POWER",
+        help_heading = "PROBE CONFIGURATION"
+    )]
+    pub cycle_power: bool,
+
     /// Disable interactive probe selection
     #[arg(
         long,
@@ -112,7 +120,9 @@ pub struct ProbeOptions {
     /// Use this flag to select a specific probe in the list.
     ///
     /// Use '--probe VID:PID' or '--probe VID:PID:Serial' if you have more than one
-    /// probe with the same VID:PID.",
+    /// probe with the same VID:PID. For multi-channel FTDI probes (e.g. FT2232H),
+    /// use '--probe VID:PID-INTERFACE' to select the channel (0=A, 1=B, 2=C, 3=D).
+    /// Example: '--probe 0403:6010-1' selects Channel B.
     #[arg(long, env = "PROBE_RS_PROBE", help_heading = "PROBE CONFIGURATION")]
     pub probe: Option<DebugProbeSelector>,
     /// The protocol speed in kHz.
@@ -267,7 +277,7 @@ impl<'r> LoadedProbeOptions<'r> {
             // If we got a probe selector as an argument, open the probe
             // matching the selector if possible.
             match &self.0.probe {
-                Some(selector) => lister.open(selector)?,
+                Some(selector) => lister.open(selector.clone())?,
                 None => Self::select_probe(lister, self.0.non_interactive)?,
             }
         };

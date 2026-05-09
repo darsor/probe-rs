@@ -15,7 +15,7 @@ use crate::{
             monitor::{MonitorSender, RttPoller, SemihostingEvent},
         },
         utils::{
-            run_loop::{ReturnReason, RunLoop},
+            run_loop::{ReturnReason, RunLoop, VectorCatchConfig},
             semihosting::{SemihostingFileManager, SemihostingOptions},
         },
     },
@@ -139,11 +139,10 @@ fn list_tests_impl(
         sender.send_semihosting_event(event).unwrap()
     });
 
-    let mut rtt_client = request
+    let core_id = request
         .rtt_client
-        .map(|rtt_client| ctx.object_mut_blocking(rtt_client));
-
-    let core_id = rtt_client.as_ref().map(|rtt| rtt.core_id()).unwrap_or(0);
+        .map(|rtt_client| ctx.object_mut_blocking(rtt_client).core_id())
+        .unwrap_or(0);
 
     let mut run_loop = RunLoop {
         core_id,
@@ -155,7 +154,7 @@ fn list_tests_impl(
         request.boot_info.prepare(&mut session, run_loop.core_id)?;
     }
 
-    let poller = rtt_client.as_deref_mut().map(|client| RttPoller {
+    let poller = request.rtt_client.map(|client| RttPoller {
         rtt_client: client,
         clear_control_block: true,
         sender: |message| {
@@ -167,8 +166,12 @@ fn list_tests_impl(
 
     match run_loop.run_until(
         &shared_session,
-        true,
-        true,
+        VectorCatchConfig {
+            catch_hardfault: true,
+            catch_reset: true,
+            catch_svc: true,
+            catch_hlt: true,
+        },
         poller,
         Some(Duration::from_secs(5)),
         |halt_reason, core| list_handler.handle_halt(halt_reason, core),
@@ -227,11 +230,10 @@ fn run_test_impl(
 
     let shared_session = ctx.shared_session(request.sessid);
 
-    let mut rtt_client = request
+    let core_id = request
         .rtt_client
-        .map(|rtt_client| ctx.object_mut_blocking(rtt_client));
-
-    let core_id = rtt_client.as_ref().map(|rtt| rtt.core_id()).unwrap_or(0);
+        .map(|rtt_client| ctx.object_mut_blocking(rtt_client).core_id())
+        .unwrap_or(0);
 
     {
         let mut session = shared_session.session_blocking();
@@ -250,7 +252,7 @@ fn run_test_impl(
         cancellation_token: ctx.cancellation_token(),
     };
 
-    let poller = rtt_client.as_deref_mut().map(|client| RttPoller {
+    let poller = request.rtt_client.map(|client| RttPoller {
         rtt_client: client,
         clear_control_block: true,
         sender: |message| {
@@ -262,8 +264,12 @@ fn run_test_impl(
 
     match run_loop.run_until(
         &shared_session,
-        true,
-        true,
+        VectorCatchConfig {
+            catch_hardfault: true,
+            catch_reset: true,
+            catch_svc: true,
+            catch_hlt: true,
+        },
         poller,
         Some(timeout),
         |halt_reason, core| run_handler.handle_halt(halt_reason, core),
@@ -394,7 +400,7 @@ impl<F: FnMut(SemihostingEvent)> RunEventHandler<F> {
             HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd)) => cmd,
             // Exception occurred (e.g. hardfault) => Abort testing altogether
             reason => anyhow::bail!(
-                "The CPU halted unexpectedly: {reason:?}. Test should signal failure via a panic handler that calls `semihosting::proces::abort()` instead",
+                "The CPU halted unexpectedly: {reason:?}. Test should signal failure via a panic handler that calls `semihosting::process::abort()` instead",
             ),
         };
 
